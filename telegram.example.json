@@ -1,0 +1,15 @@
+{
+	"profiles": {
+		"personal": {
+			"botToken": "REPLACE_WITH_BOT_TOKEN",
+			"botUsername": "D3athhbot",
+			"botId": 0,
+			"allowedUserId": 0,
+			"lastUpdateId": 244732103
+		}
+	},
+	"assistant": {
+		"rendering": "html",
+		"activity": "quiet"
+	}
+}

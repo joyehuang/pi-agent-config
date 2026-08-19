@@ -1,0 +1,21 @@
+{
+  "lastChangelogVersion": "0.84.1",
+  "theme": "dark",
+  "defaultProvider": "cmd-code",
+  "defaultModel": "cc/deepseek-v4-flash",
+  "defaultThinkingLevel": "high",
+  "packages": [
+    "npm:pi-feishu-agent",
+    "npm:@llblab/pi-telegram",
+    "npm:pi-mcp-adapter"
+  ],
+  "extensions": [
+    "~/.pi/agent/extensions/memory-inject"
+  ],
+  "enabledModels": [
+    "openai-codex/gpt-5.6-sol",
+    "openai-codex/gpt-5.6-luna",
+    "deepseek/deepseek-v4-flash",
+    "cmd-code/cc/deepseek-v4-flash"
+  ]
+}
