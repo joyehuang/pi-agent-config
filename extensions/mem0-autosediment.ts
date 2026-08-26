@@ -45,8 +45,8 @@ function autosedLog(msg: string) {
 // 每轮候选消息先发给 Command Code 的 Qwen/Qwen3.7-Plus 判定：
 //   1. 是否值得沉淀（区分稳定事实 vs 一次性问答/过程讨论/寒暄）
 //   2. 若值得，顺手提炼成第三人称陈述句（memory），写入时用提炼版而非原文
-// 失败降级：LLM 不可用/超时/解析失败 → 走原 isWorthSaving 规则不过滤（宁可多记不漏记），
-// 但日志留痕。成本：每轮一次 ~200 token 小调用（Qwen3.7-Plus 极便宜）。
+// 失败降级：LLM 不可用/超时/解析失败 → 跳过不存（宁可少记不漏记，避免过程性内容污染召回），
+// 日志留痕。成本：每轮一次 ~200 token 小调用（Qwen3.7-Plus 极便宜）。
 const CC_BASE = "https://api.commandcode.ai/provider/v1";
 const CC_MODEL = "Qwen/Qwen3.7-Plus";
 
@@ -78,7 +78,7 @@ const FILTER_SYSTEM = `你是长期记忆筛选器。用户在跟 AI agent 的�
 
 function filterWithLLM(text: string): Promise<{ save: boolean; memory: string; reason: string }> {
   const key = loadCcKey();
-  if (!key) return Promise.resolve({ save: true, memory: text, reason: "无 CC key，降级不过滤" });
+  if (!key) return Promise.resolve({ save: false, memory: "", reason: "无 CC key，降级不写入" });
   const body = {
     model: CC_MODEL,
     messages: [
@@ -106,8 +106,8 @@ function filterWithLLM(text: string): Promise<{ save: boolean; memory: string; r
       return { save, memory, reason };
     })
     .catch((e) => {
-      autosedLog(`LLM 过滤失败，降级不过滤: ${String(e).slice(0, 120)}`);
-      return { save: true, memory: text, reason: "LLM 失败降级" };
+      autosedLog(`LLM 过滤失败，降级不写入: ${String(e).slice(0, 120)}`);
+      return { save: false, memory: "", reason: "LLM 失败降级，宁可少记不漏记" };
     });
 }
 function notifyMemorized(content: string) {
