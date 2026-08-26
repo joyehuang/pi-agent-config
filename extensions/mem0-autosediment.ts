@@ -22,14 +22,28 @@ import { createHash } from "node:crypto";
 
 const MEM0_CLI = `${process.env.HOME}/bin/mem0-cli.py`;
 const NOTIFY = `${process.env.HOME}/bin/notify-telegram.py`;
+const AUTOSED_LOG = `/tmp/autosediment.log`;
 // 防抖：同一 session 文件最近一次沉淀的 key（消息内容 hash）
 let lastWrite = { sessionFile: "", msgHash: "" };
 
+// autosediment 自身日志（每次 agent_end 写入判定都留痕，便于查"该发没发"）
+function autosedLog(msg: string) {
+  try {
+    const { appendFileSync } = require("node:fs");
+    appendFileSync(AUTOSED_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {
+    // 静默
+  }
+}
+
 // 写入成功 → 独立 Telegram 消息确认（system-message 风格，不占下一轮回复）
+// v2.2（2026-08-26）：不再硬截 60 字符——用户 quote 的引用内容常被截得看不懂。
+// 改为完整内容（Telegram 单条上限 4096），仅当极端超长（>900）才截断并带明确提示。
 function notifyMemorized(content: string) {
   try {
-    const snippet = content.slice(0, 60).replace(/\n/g, " ");
-    const msg = `🧠 已记忆：${snippet}…`;
+    const oneLine = content.replace(/\n+/g, " ").trim();
+    const full = oneLine.length > 900 ? oneLine.slice(0, 900) + "…（内容过长已截断）" : oneLine;
+    const msg = `🧠 已记忆：${full}`;
     const child = spawn(NOTIFY, [msg], { stdio: ["ignore", "ignore", "ignore"] });
     // 10s 超时兜底，不阻塞主流程
     const timer = setTimeout(() => child.kill(), 10000);
@@ -91,20 +105,27 @@ function extractUserMessages(messages: unknown[]): string[] {
 }
 
 function writeToMem0(content: string) {
-  return new Promise<boolean>((resolve) => {
+  return new Promise<{ ok: boolean; ids: string[] }>((resolve) => {
     const child = spawn(MEM0_CLI, ["add", content], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
-    let ok = false;
+    // ⚠️ 修复（2026-08-26）：只收 stdout，不拼 stderr！
+    // mem0-cli 每次跑都会向 stderr 打 [PostHog] 警告，且先于 stdout 的 OK 到达；
+    // 之前把 stderr 也拼进 out，导致 out 以 [PostHog] 开头，/^OK/ 误判失败 → notify 永不触发。
     child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (out += d));
+    child.stderr.on("data", () => {}); // 丢弃 stderr（PostHog 噪音）
     child.on("close", () => {
-      ok = /^OK/.test(out.trim());
-      resolve(ok);
+      const trimmed = out.trim();
+      // 严格判定：^OK 且后面跟了 id 列表（OK [xxx]），OK [] 表示没产生新条目
+      const m = trimmed.match(/^OK \[([^\]]*)\]/);
+      const ok = !!m;
+      const ids = m && m[1] ? m[1].split(",").filter(Boolean) : [];
+      autosedLog(`add 判定: ok=${ok} ids=${ids.length} out=${JSON.stringify(trimmed.slice(0, 80))}`);
+      resolve({ ok, ids });
     });
-    child.on("error", () => resolve(false)); // 静默失败，不阻塞
+    child.on("error", () => resolve({ ok: false, ids: [] })); // 静默失败，不阻塞
     setTimeout(() => {
       child.kill();
-      resolve(false);
+      resolve({ ok: false, ids: [] });
     }, 30000);
   });
 }
@@ -124,9 +145,16 @@ export default function (pi) {
       for (const text of worthies) {
         const msgHash = createHash("sha1").update(text).digest("hex").slice(0, 12);
         if (lastWrite.sessionFile === event.sessionFile && lastWrite.msgHash === msgHash) continue;
-        const ok = await writeToMem0(text);
+        autosedLog(`准备沉淀: ${JSON.stringify(text.slice(0, 60))}`);
+        const r = await writeToMem0(text);
         lastWrite = { sessionFile: event.sessionFile, msgHash };
-        if (ok) markMemorized(text);
+        // 只有真正产生新条目（OK [id]）才发通知；OK []（被合并/无新条目）也记录但不打扰
+        if (r.ok && r.ids.length > 0) {
+          autosedLog(`写入成功 ${r.ids.join(",")} → 发通知`);
+          markMemorized(text);
+        } else {
+          autosedLog(`未发通知: ok=${r.ok} ids=${r.ids.length} (OK [] 可能被合并或无新条目)`);
+        }
       }
     } catch {
       // 静默失败，绝不影响主流程
