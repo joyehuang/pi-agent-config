@@ -11,6 +11,9 @@
 //      值得记的是被引用的结论而不是"记一下"三个字）。提取后拼进写入内容，且放在用户原话之前。
 //   3. 保留消息内容 hash 去重（防 agent_end 因重试/auto-compact 重复触发写入同一消息）。
 //   4. 过滤放宽：<20 字符不再一刀切，只滤纯指令/寒暄/感谢。
+//   5. **「已记忆」独立反馈（v2.1）** —— 写入成功后立即通过 ~/bin/notify-telegram.py 发一条
+//      独立 Telegram 消息确认（不依赖下一轮回复；会话不连续时也能即时看到）。
+//      用户 8-26 明确要求："不要在下一轮回复，可以单独一条类似 system message 一样的"。
 //
 // 实现：在 agent_end 时，把本次 run 的 messages 里「用户消息」提取出来，用 mem0-cli add 写入。
 // 通过 child_process 调 ~/bin/mem0-cli.py（独立进程，避免阻塞 pi 事件循环）。
@@ -18,9 +21,24 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const MEM0_CLI = `${process.env.HOME}/bin/mem0-cli.py`;
-const LAST_WRITE_FILE = `${process.env.HOME}/.pi/agent/tmp/mem0-last-write.json`;
+const NOTIFY = `${process.env.HOME}/bin/notify-telegram.py`;
 // 防抖：同一 session 文件最近一次沉淀的 key（消息内容 hash）
 let lastWrite = { sessionFile: "", msgHash: "" };
+
+// 写入成功 → 独立 Telegram 消息确认（system-message 风格，不占下一轮回复）
+function notifyMemorized(content: string) {
+  try {
+    const snippet = content.slice(0, 60).replace(/\n/g, " ");
+    const msg = `🧠 已记忆：${snippet}…`;
+    const child = spawn(NOTIFY, [msg], { stdio: ["ignore", "ignore", "ignore"] });
+    // 10s 超时兜底，不阻塞主流程
+    const timer = setTimeout(() => child.kill(), 10000);
+    child.on("close", () => clearTimeout(timer));
+    child.on("error", () => clearTimeout(timer));
+  } catch {
+    // 静默失败
+  }
+}
 
 // Telegram 引用回复标记：[reply|from:名字] 被引用的完整文本
 // 提取被引用内容并拼进写入文本（被引用的是用户真正想记的）
@@ -91,16 +109,9 @@ function writeToMem0(content: string) {
   });
 }
 
-// 「已记忆」反馈：写入成功后记状态文件，下一轮注入提示让模型口播
+// 「已记忆」反馈：写入成功后发独立 Telegram 消息（用户要求：不依赖下一轮回复）
 function markMemorized(content: string) {
-  try {
-    const { mkdirSync, writeFileSync } = require("node:fs");
-    const dir = require("node:path").dirname(LAST_WRITE_FILE);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(LAST_WRITE_FILE, JSON.stringify({ at: new Date().toISOString(), snippet: content.slice(0, 80) }), "utf8");
-  } catch {
-    // 不影响主流程
-  }
+  notifyMemorized(content);
 }
 
 export default function (pi) {

@@ -20,7 +20,6 @@ import { join } from "node:path";
 
 const FILES = [".memory.md", ".user.md"].map((f) => join(process.env.HOME || "", f));
 const MEM0_CLI = `${process.env.HOME}/bin/mem0-cli.py`;
-const LAST_WRITE_FILE = `${process.env.HOME}/.pi/agent/tmp/mem0-last-write.json`;
 let cache: { key: string; content: string; rules: string } | null = null;
 
 // 单路召回：mem0 search（失败静默返回空数组）
@@ -65,10 +64,10 @@ function recallQuery(): string {
   }
 }
 
-// 时间衰减权重：effective = score × 0.5^(days/30)，半衰期 30 天
-// 温和偏置——30 天内基本保留，90 天才衰减到 1/8。高 score 旧记忆仍能胜出（呼应"时间久不等于不重要"）。
-// 注意：这是简化版，最终方案（提及频次等非线性权重）留待 08-31 讨论。
-const HALF_LIFE = 30; // 天
+// 时间衰减权重：effective = score × 0.5^(days/14)，指数半衰 14 天（Akashic hotness 公式）
+// 用户 8-26 明确指定："时间权重这里就用之前那个半衰期14天那个公式"。
+// 温和偏置——高 score 旧记忆仍能胜出（呼应"时间久不等于不重要"）。
+const HALF_LIFE = 14; // 天
 function effectiveScore(score: number, days: number): number {
   if (days <= 0) return score;
   return score * Math.pow(0.5, days / HALF_LIFE);
@@ -151,7 +150,7 @@ export default function (pi) {
       ? `<rules>\n${cache.rules}\n</rules>\n\n每次回复前必须先核对上方 <rules>，违反其中任何一条都是事故，不得违反。`
       : "";
 
-    // v4: 多路召回（Lane A 当前消息 + Lane B recap 主题），失败静默降级
+    // 多路召回（Lane A 当前消息 + Lane B recap 主题），失败静默降级
     let mem0Block = "";
     try {
       const prompt = (event as { prompt?: string }).prompt ?? "";
@@ -163,31 +162,11 @@ export default function (pi) {
       // 静默降级
     }
 
-    // 「已记忆」反馈：上一轮 autosediment 写入成功后留下状态文件，注入提示让模型在回复开头带标记
-    let memorizedBlock = "";
-    try {
-      const fs = require("node:fs");
-      const raw = fs.readFileSync(LAST_WRITE_FILE, "utf8");
-      const info = JSON.parse(raw);
-      const ageMs = Date.now() - new Date(info.at).getTime();
-      // 只在 10 分钟内有效（防止陈旧提示反复出现）；超过则清除
-      if (ageMs < 10 * 60 * 1000) {
-        const t = new Date(info.at);
-        const hhmm = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
-        memorizedBlock = `\n\n[上轮记忆已写入] ${hhmm} 沉淀了一条记忆（${info.snippet}…）。用户应能感知到记忆在持续沉淀——回复开头可带一个轻量标记（如 🧠）确认。`;
-      } else {
-        fs.rmSync(LAST_WRITE_FILE, { force: true });
-      }
-    } catch {
-      // 无状态文件或已过期 → 无提示
-    }
-
     return {
       systemPrompt:
         (rulesBlock ? `${rulesBlock}\n\n` : "") +
         // recalled-memory 紧跟 rules 之后、system prompt 之前（显眼，不被长文档淹没）
         `${mem0Block}` +
-        `${memorizedBlock}` +
         `${event.systemPrompt ?? ""}\n\n<memory>\n${cache.content}\n</memory>`,
     };
   });
