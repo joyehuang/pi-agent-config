@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const MEM0_CLI = `${process.env.HOME}/bin/mem0-cli.py`;
+const LAST_WRITE_FILE = `${process.env.HOME}/.pi/agent/tmp/mem0-last-write.json`;
 // 防抖：同一 session 文件最近一次沉淀的 key（消息内容 hash）
 let lastWrite = { sessionFile: "", msgHash: "" };
 
@@ -72,18 +73,34 @@ function extractUserMessages(messages: unknown[]): string[] {
 }
 
 function writeToMem0(content: string) {
-  return new Promise<void>((resolve) => {
+  return new Promise<boolean>((resolve) => {
     const child = spawn(MEM0_CLI, ["add", content], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    let ok = false;
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
-    child.on("close", () => resolve());
-    child.on("error", () => resolve()); // 静默失败，不阻塞
+    child.on("close", () => {
+      ok = /^OK/.test(out.trim());
+      resolve(ok);
+    });
+    child.on("error", () => resolve(false)); // 静默失败，不阻塞
     setTimeout(() => {
       child.kill();
-      resolve();
+      resolve(false);
     }, 30000);
   });
+}
+
+// 「已记忆」反馈：写入成功后记状态文件，下一轮注入提示让模型口播
+function markMemorized(content: string) {
+  try {
+    const { mkdirSync, writeFileSync } = require("node:fs");
+    const dir = require("node:path").dirname(LAST_WRITE_FILE);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(LAST_WRITE_FILE, JSON.stringify({ at: new Date().toISOString(), snippet: content.slice(0, 80) }), "utf8");
+  } catch {
+    // 不影响主流程
+  }
 }
 
 export default function (pi) {
@@ -96,8 +113,9 @@ export default function (pi) {
       for (const text of worthies) {
         const msgHash = createHash("sha1").update(text).digest("hex").slice(0, 12);
         if (lastWrite.sessionFile === event.sessionFile && lastWrite.msgHash === msgHash) continue;
-        await writeToMem0(text);
+        const ok = await writeToMem0(text);
         lastWrite = { sessionFile: event.sessionFile, msgHash };
+        if (ok) markMemorized(text);
       }
     } catch {
       // 静默失败，绝不影响主流程
