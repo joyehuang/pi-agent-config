@@ -45,7 +45,7 @@ function autosedLog(msg: string) {
 // 每轮候选消息先发给 Command Code 的 Qwen/Qwen3.7-Plus 判定：
 //   1. 是否值得沉淀（区分稳定事实 vs 一次性问答/过程讨论/寒暄）
 //   2. 若值得，顺手提炼成第三人称陈述句（memory），写入时用提炼版而非原文
-// 失败降级：LLM 不可用/超时/解析失败 → 跳过不存（宁可少记不漏记，避免过程性内容污染召回），
+// 失败降级：LLM 不可用/超时（60s）/解析失败 → 跳过不存（宁可少记不漏记，避免过程性内容污染召回），
 // 日志留痕。成本：每轮一次 ~200 token 小调用（Qwen3.7-Plus 极便宜）。
 const CC_BASE = "https://api.commandcode.ai/provider/v1";
 const CC_MODEL = "Qwen/Qwen3.7-Plus";
@@ -61,6 +61,8 @@ function loadCcKey(): string {
 
 const FILTER_SYSTEM = `你是长期记忆筛选器。用户在跟 AI agent 的对话中说了下面这句话，请判断它是否值得存入长期记忆。
 
+**默认不记。** 绝大多数对话都不值得存——只有极少数情况才应记：
+
 值得记（should_save=true）：
 - 用户身份/背景/喜好等稳定事实（生日、爱好、追的队伍、居住地、工作经历）
 - 用户偏好与沟通风格（排版、格式、语气要求）
@@ -68,11 +70,12 @@ const FILTER_SYSTEM = `你是长期记忆筛选器。用户在跟 AI agent 的�
 - 踩坑经验/技术结论（具体路径、命令、报错、教训）
 - 用户明确要求记住的内容（"记住X""记一下"）
 
-不值得记（should_save=false）：
-- 一次性问答/概念澄清（"X是什么？""X是不是Y？"）
+不值得记（should_save=false）——这些占了绝大多数：
+- 任何一次性的问题/提问/澄清/请求（"X是什么？""帮我看看X""这个怎么改"）
+- 对当前任务/项目的讨论、过程性描述、待办、计划（"我想做X""下一步做Y""这个先不急"）
+- 对刚才回复的反馈/评价（"感觉不对""你说得对""太那啥了"）
 - 寒暄/确认/纯指令（"好的""继续""看看"）
-- 过程性讨论/临时状态（"我在想""待定""下一步做X"）
-- 对刚才回复的普通回应，不包含新的稳定事实
+- 消息本身不包含新的稳定事实、偏好或决策时，一律不记
 
 只输出 JSON（不要输出其他文字）：{"should_save": true或false, "memory": "提炼后的陈述句（第三人称、含主语与日期；若 should_save=false 则为空串）", "reason": "一句话理由"}`;
 
@@ -92,7 +95,7 @@ function filterWithLLM(text: string): Promise<{ save: boolean; memory: string; r
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(60000),
   })
     .then((r) => r.json())
     .then((j) => {
@@ -134,12 +137,14 @@ function extractQuote(text: string): string | null {
   return quoted.length > 0 ? quoted : null;
 }
 
-// 不值得沉淀的消息特征（纯指令/寒暄/极短）
+// 不值得沉淀的消息特征（纯指令/寒暄/极短/过程性反馈）
 function isWorthSaving(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return false;
   // 纯指令、确认、寒暄（即使带 quote 也被上面的提取逻辑拆开了）
   if (/^(好的|好|ok|OK|嗯|可以|继续|看看|知道了|收到|谢谢|感谢|辛苦了|可以了|就这样|先这样|没问题|对|是的|行|来吧|搞|做吧|开始|等一下|稍等)/.test(t)) return false;
+  // 过程性反馈/评价/讨论（不含新稳定事实的短句）——这类交给 LLM 判定，但先拦掉明显形式
+  if (/^(感觉|觉得|这个|这样|现在|目前|就是|其实|突然|我记得|我想|我要|我需要|为什么|怎么|是不是|有没有|能不能|可否)/.test(t) && t.length < 60) return false;
   return true;
 }
 
