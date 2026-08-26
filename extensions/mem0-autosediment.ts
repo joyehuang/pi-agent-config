@@ -39,6 +39,77 @@ function autosedLog(msg: string) {
 // 写入成功 → 独立 Telegram 消息确认（system-message 风格，不占下一轮回复）
 // v2.2（2026-08-26）：不再硬截 60 字符——用户 quote 的引用内容常被截得看不懂。
 // 改为完整内容（Telegram 单条上限 4096），仅当极端超长（>900）才截断并带明确提示。
+//
+// v2.3（2026-08-26）：LLM 过滤层 —— 用户拍板"交给 LLM 过滤一遍"（因 8-26 误沉淀了
+// 一次性问答"agent_end hook是算作兜底处理吗？"，污染召回）。
+// 每轮候选消息先发给 Command Code 的 Qwen/Qwen3.7-Plus 判定：
+//   1. 是否值得沉淀（区分稳定事实 vs 一次性问答/过程讨论/寒暄）
+//   2. 若值得，顺手提炼成第三人称陈述句（memory），写入时用提炼版而非原文
+// 失败降级：LLM 不可用/超时/解析失败 → 走原 isWorthSaving 规则不过滤（宁可多记不漏记），
+// 但日志留痕。成本：每轮一次 ~200 token 小调用（Qwen3.7-Plus 极便宜）。
+const CC_BASE = "https://api.commandcode.ai/provider/v1";
+const CC_MODEL = "Qwen/Qwen3.7-Plus";
+
+function loadCcKey(): string {
+  try {
+    const { readFileSync } = require("node:fs");
+    return readFileSync(`${process.env.HOME}/.config/cmd-code/key`, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+const FILTER_SYSTEM = `你是长期记忆筛选器。用户在跟 AI agent 的对话中说了下面这句话，请判断它是否值得存入长期记忆。
+
+值得记（should_save=true）：
+- 用户身份/背景/喜好等稳定事实（生日、爱好、追的队伍、居住地、工作经历）
+- 用户偏好与沟通风格（排版、格式、语气要求）
+- 技术决策与理由（"以后X都用Y""改为Z因为W"）
+- 踩坑经验/技术结论（具体路径、命令、报错、教训）
+- 用户明确要求记住的内容（"记住X""记一下"）
+
+不值得记（should_save=false）：
+- 一次性问答/概念澄清（"X是什么？""X是不是Y？"）
+- 寒暄/确认/纯指令（"好的""继续""看看"）
+- 过程性讨论/临时状态（"我在想""待定""下一步做X"）
+- 对刚才回复的普通回应，不包含新的稳定事实
+
+只输出 JSON（不要输出其他文字）：{"should_save": true或false, "memory": "提炼后的陈述句（第三人称、含主语与日期；若 should_save=false 则为空串）", "reason": "一句话理由"}`;
+
+function filterWithLLM(text: string): Promise<{ save: boolean; memory: string; reason: string }> {
+  const key = loadCcKey();
+  if (!key) return Promise.resolve({ save: true, memory: text, reason: "无 CC key，降级不过滤" });
+  const body = {
+    model: CC_MODEL,
+    messages: [
+      { role: "system", content: FILTER_SYSTEM },
+      { role: "user", content: text },
+    ],
+    temperature: 0,
+    max_tokens: 300,
+  };
+  return fetch(`${CC_BASE}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20000),
+  })
+    .then((r) => r.json())
+    .then((j) => {
+      const raw = j?.choices?.[0]?.message?.content ?? "";
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error("no JSON in response");
+      const parsed = JSON.parse(m[0]);
+      const save = !!parsed.should_save;
+      const memory = typeof parsed.memory === "string" && parsed.memory.trim() ? parsed.memory.trim() : text;
+      const reason = typeof parsed.reason === "string" ? parsed.reason : "";
+      return { save, memory, reason };
+    })
+    .catch((e) => {
+      autosedLog(`LLM 过滤失败，降级不过滤: ${String(e).slice(0, 120)}`);
+      return { save: true, memory: text, reason: "LLM 失败降级" };
+    });
+}
 function notifyMemorized(content: string) {
   try {
     const oneLine = content.replace(/\n+/g, " ").trim();
@@ -146,12 +217,19 @@ export default function (pi) {
         const msgHash = createHash("sha1").update(text).digest("hex").slice(0, 12);
         if (lastWrite.sessionFile === event.sessionFile && lastWrite.msgHash === msgHash) continue;
         autosedLog(`准备沉淀: ${JSON.stringify(text.slice(0, 60))}`);
-        const r = await writeToMem0(text);
+        // v2.3：LLM 过滤 + 提炼。无论判定结果都更新防抖，避免同一消息反复问 LLM。
+        const verdict = await filterWithLLM(text);
         lastWrite = { sessionFile: event.sessionFile, msgHash };
+        if (!verdict.save) {
+          autosedLog(`LLM 判定不值得沉淀: ${JSON.stringify(verdict.reason.slice(0, 80))}`);
+          continue;
+        }
+        autosedLog(`LLM 判定值得沉淀: ${JSON.stringify(verdict.reason.slice(0, 80))}`);
+        const r = await writeToMem0(verdict.memory);
         // 只有真正产生新条目（OK [id]）才发通知；OK []（被合并/无新条目）也记录但不打扰
         if (r.ok && r.ids.length > 0) {
           autosedLog(`写入成功 ${r.ids.join(",")} → 发通知`);
-          markMemorized(text);
+          markMemorized(verdict.memory);
         } else {
           autosedLog(`未发通知: ok=${r.ok} ids=${r.ids.length} (OK [] 可能被合并或无新条目)`);
         }
