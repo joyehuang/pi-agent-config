@@ -45,6 +45,54 @@ export default function (pi: ExtensionAPI) {
         },
       },
       {
+        // CC 端底层转发 OpenRouter（provider: Z.AI），模型 id 必须用全名 z-ai/glm-5.3-flash
+        // 价格暂按 OpenRouter 价（$0.075/$0.25 per M）记账，CC 实际扣 credits 待观察
+        id: "z-ai/glm-5.3-flash",
+        name: "GLM 5.3 Flash (CC)",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0.075, output: 0.25, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1048576,
+        maxTokens: 131072,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          maxTokensField: "max_tokens",
+          thinkingFormat: "openrouter",
+        },
+        thinkingLevelMap: {
+          minimal: null,
+          low: "low",
+          medium: "medium",
+          high: "high",
+          max: null,
+        },
+      },
+      {
+        // Qwen3.8-Flash：CC 端模型 id 全名 Qwen/Qwen3.8-Flash，2026-08-28 实测 CC 上最快（中位 3s/40 tok/s）
+        // 价格按 OpenRouter Qwen3 系 flash 档暂记，待核实
+        id: "Qwen/Qwen3.8-Flash",
+        name: "Qwen 3.8 Flash (CC)",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0.075, output: 0.3, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1048576,
+        maxTokens: 131072,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          maxTokensField: "max_tokens",
+          thinkingFormat: "openrouter",
+        },
+        thinkingLevelMap: {
+          minimal: null,
+          low: "low",
+          medium: "medium",
+          high: "high",
+          max: null,
+        },
+      },
+      {
         id: "cc/deepseek-v4-pro",
         name: "cc/deepseek-v4-pro",
         reasoning: true,
