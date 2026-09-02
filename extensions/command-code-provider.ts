@@ -93,6 +93,31 @@ export default function (pi: ExtensionAPI) {
         },
       },
       {
+        // Kimi K3：CC 端模型 id 全名 moonshotai/Kimi-K3（2026-09-02 确认在 CC 模型列表）
+        // 价格 CC 未公布，先占位记账待核实；context 按.K2 系 256k 暂定
+        id: "moonshotai/Kimi-K3",
+        name: "Kimi K3 (CC)",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 262144,
+        maxTokens: 131072,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          maxTokensField: "max_tokens",
+          requiresReasoningContentOnAssistantMessages: true,
+          thinkingFormat: "deepseek",
+        },
+        thinkingLevelMap: {
+          minimal: null,
+          low: "low",
+          medium: null,
+          high: "high",
+          max: null,
+        },
+      },
+      {
         id: "cc/deepseek-v4-pro",
         name: "cc/deepseek-v4-pro",
         reasoning: true,
