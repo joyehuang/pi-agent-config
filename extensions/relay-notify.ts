@@ -74,13 +74,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function collect() {
-		const notices = scan()
-		if (notices.length === 0) return
-		if (busy) {
-			pending.push(...notices)
-			return
-		}
-		pending.push(...notices)
+		// 无论 scan 是否有新文件都要走 flush：scan 只收新落盘的通知，
+		// 而 pending 里的积压（忙时入队的）不依赖新文件，必须独立补发
+		// （2026-09-04 bug：collect 在 scan 为空时提前 return，导致
+		// 「忙时入队、闲时补发」路径永远不触发，通知被消费但丢失）
+		pending.push(...scan())
+		if (busy) return
 		flush()
 	}
 
