@@ -72,6 +72,10 @@ const FILTER_SYSTEM = `你是长期记忆筛选器。用户在跟 AI agent 的�
 
 不值得记（should_save=false）——这些占了绝大多数：
 - 任何一次性的问题/提问/澄清/请求（"X是什么？""帮我看看X""这个怎么改"）
+- 汇报某次改动已提交/已修复（"修复了X，commit abc1234""提交了Y"）——可由代码确认，不记
+- 投递/收藏/调研某个岗位或公司的一次性任务（"搜一下X公司""这个JD收藏一下""投了Y"）：求职状态不是长期稳定事实，别从任务请求里推断身份；只有明确的面试结果被用户告知时才可记
+- 不要把"收藏/整理/存档/转发"理解成"记住"——这类请求是文件管理操作，不是长期记忆指令
+- 代码提交/开发进展汇报一律不记：commit、commit hash、push、PR 编号、版本号这类信息 git log 和代码里都能查到，属于可从代码确认的过程性细节（用户 2026-09-05 明确要求）。提炼 memory 时也严禁夹带 commit hash；项目进展只记结构性事实（上线了什么能力、什么决策），commit 细节不进记忆
 - 对当前任务/项目的讨论、过程性描述、待办、计划（"我想做X""下一步做Y""这个先不急"）
 - 对刚才回复的反馈/评价（"感觉不对""你说得对""太那啥了"）
 - 寒暄/确认/纯指令（"好的""继续""看看"）
@@ -231,12 +235,18 @@ export default function (pi) {
         }
         autosedLog(`LLM 判定值得沉淀: ${JSON.stringify(verdict.reason.slice(0, 80))}`);
         const r = await writeToMem0(verdict.memory);
-        // 只有真正产生新条目（OK [id]）才发通知；OK []（被合并/无新条目）也记录但不打扰
-        if (r.ok && r.ids.length > 0) {
-          autosedLog(`写入成功 ${r.ids.join(",")} → 发通知`);
-          markMemorized(verdict.memory);
+        // 用户要求（2026-08-27）：只要判定值得沉淀且 add 调用成功就弹通知，让记忆添加完全可视化。
+        // OK []（被 mem0 去重合并）也要提示，否则用户无法区分「已存过去重」和「没存」。
+        if (r.ok) {
+          if (r.ids.length > 0) {
+            autosedLog(`写入成功 ${r.ids.join(",")} → 发通知`);
+            markMemorized(verdict.memory);
+          } else {
+            autosedLog("add 成功但被去重合并 → 发合并提示");
+            markMemorized(`（已有相似记忆，已合并）${verdict.memory}`);
+          }
         } else {
-          autosedLog(`未发通知: ok=${r.ok} ids=${r.ids.length} (OK [] 可能被合并或无新条目)`);
+          autosedLog(`写入失败 ok=false → 不打扰，仅记日志`);
         }
       }
     } catch {
