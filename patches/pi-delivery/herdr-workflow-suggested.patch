@@ -49,18 +49,18 @@
 +本节仅在主 agent 独立验收并安装 pi-agent-config 的 delivery/watchdog 修复之后启用；不能只同步 skill 就假设运行时已支持。同步运行时与 skills 仓库时保留所有模型默认值。
  
 -### 任务分类（接到任务先判断，前台 or 后台）
-+- 登记使用 `python3 ~/bin/task_protocol.py register TASK --spec PRIVATE_JSON`，必须有 instruction、acceptance、artifacts、done_marker、type、route。Herdr 另填 agent_name/workspace_id/pane_id，不混用 workspace。
++- 登记使用 `python3 ~/bin/task_protocol.py register TASK --spec PRIVATE_JSON`，必须有 instruction、acceptance、artifacts、done_marker、type、route。Herdr 另填 agent_name/workspace_id/pane_id，不混用 workspace；读真实 result.agent.agent_status，working 保持执行态，未知查询只记录观察，不能无结果就误报警。
 +- 每次执行 `start-run TASK --run-id RUN`，再用 `run TASK RUN -- ABSOLUTE_COMMAND ARGS`。只有 runner wait 的退出码能作进程结果；worker 按 TASK_ID/TASK_RUN_ID/TASK_RESULT_PATH 输出结构化 business JSON，并在实际 stdout 打印独立 marker 行。
 +- `result TASK RUN` 查看不可变证据；空/旧产物、缺 marker、非零退出、PID 身份不符、read_error/http_error、预算耗尽都不证明目标成功。batch_finished 与 ready_for_review 分开。
 +- 禁止直接整份覆盖 registry。所有 writer 改用协议 CLI；普通元数据使用带 expected-hash 的 update。旧不守锁 writer 必须迁移，不能认为 flock 能保护任何外部写入。
 +- 收到稳定 task/run/event 后先对账，再独立按 acceptance 验收；不是复述 worker 或只回复收到。通过用 `verify TASK RUN --evidence FILE`；失败加 --reject，最多两次返工，达到上限升级给用户。
 +- 验收后继续已授权步骤。最终发出前用 prepare-report 绑定正文 hash、目标与验收；实际成功签收后用 report 关联 sender/bridge 账本。没有 message_id 或结果 unknown 不能标 reported，不能盲重发。
 +- 处理凭据单独通过 ack EVENT CLAIM handled --evidence FILE 写入；enqueued 只表示注入尝试，不能当作 handled/verified。inspect 查看 claim、lease、outbox、超时与待签收。
-+- notify-agent 旧 CLI 保留；新任务传 --task-id/--run-id/--event-id/--result-path/--route（或 task/run/phase 派生稳定 event）。同一事件双生产幂等，不同 run 不吞。
++- notify-agent 旧 CLI 和 queued 数字-数字.json 签收格式保留（私有 inbox 内可查映射，非旧 spool 文件）；新任务传 --task-id/--run-id/--event-id/--result-path/--route（或 task/run/phase 派生稳定 event）。同一事件双生产幂等，不同 run 不吞。
 +- 用户直达兜底默认保留，明确待验收/已验收的事件角色，agent 与 telegram 分别签收；不擅自改变策略。失败带 backoff 独立重试，unknown 人工对账。
 +- done/ready_for_review/blocked/verified/未签收持续巡检，超时只产生稳定提醒并保留 attention_required。主 agent 不能靠“收到”关闭任务。
-+- registry/outbox/inbox/不可变结果与凭据均为私有持久证据，不得宣称损坏可丢弃。旧任务只做保守迁移，不批量宣告完成/失败，不重放旧通知。
-+- Relay 只在当前 run-pi.sh 主进程确实拥有 Telegram owner/session/thread 且宿主和队列 idle 时注入。无 owner 留 pending；租约处理崩溃恢复；跨进程 ACK 不明按 at-least-once 对账，不承诺 exactly-once。
++- registry/outbox/inbox/不可变结果与凭据均为私有持久证据，不得宣称损坏可丢弃。旧任务（包括有 run_id 却无有效 runs metadata）只做保守迁移，不批量宣告完成/失败，不重放旧通知。用 inspect 给出的 task_hashes 及实际 inspection JSON，显式 adopt-legacy 开始新 run 或 close-legacy 归档；closed_legacy 不冒充 verified/reported。
++- Relay 只在当前 run-pi.sh 主进程确实拥有 Telegram owner/session/thread 且宿主和队列 idle 时注入。无 owner 留 pending；租约处理崩溃恢复；只认 getBranch 当前分支输入。输入持久化不等于已处理：原 handling deadline 后一次稳定恢复提示，仍无 proof 则 needs_attention，不无限续 enqueued 租约。跨进程 ACK 不明按 at-least-once 对账，不承诺 exactly-once。
  
 -- **前台**：需要中途与用户交互、或几分钟内能完的问答/小改。
 -- **后台**：能独立完成、有明确验收标准的活（改代码/跑调研/做报告/长任务烧 token）。

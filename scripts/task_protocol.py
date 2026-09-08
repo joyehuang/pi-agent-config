@@ -8,6 +8,9 @@ from pathlib import Path
 ROOT = Path.home() / '.config/agent-tasks'
 HERDR = Path.home() / '.local/bin/herdr'
 
+class LegacyAdoptionRequired(ValueError):
+    pass
+
 def digest(value):
     return hashlib.sha256(value if isinstance(value, bytes) else json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -83,20 +86,71 @@ def pid_identity(pid):
         return {'pid': int(pid), 'birth': p.stdout.strip()} if p.returncode == 0 and p.stdout.strip() else None
     except (OSError, subprocess.SubprocessError, ValueError): return None
 
+def current_run(t):
+    rid=t.get('run_id'); runs=t.get('runs')
+    run=runs.get(rid) if isinstance(runs,dict) and isinstance(rid,str) else None
+    return run if (isinstance(run,dict) and run.get('run_id')==rid
+      and isinstance(run.get('started_at'),(int,float)) and isinstance(run.get('baseline'),list)) else None
+
+def is_legacy(t):
+    if t.get('status')=='closed_legacy': return False
+    return current_run(t) is None and (bool(t.get('run_id')) or not isinstance(t.get('runs'),dict) or t.get('status')!='registered')
+
+def mark_legacy(t):
+    if 'legacy_snapshot' not in t:
+        t['legacy_snapshot']=copy.deepcopy(t)
+    t.setdefault('legacy_status',t.get('status'))
+    t.setdefault('legacy_run_id',t.get('run_id'))
+    t.setdefault('migration','needs_explicit_legacy_inspection_no_replay')
+
+def new_run(t,rid):
+    runs=t.setdefault('runs',{})
+    if rid in runs: raise ValueError('run exists')
+    active=current_run(t)
+    if active and active.get('result_path') is None and t['status']=='running':
+        raise ValueError('active run requires reconciliation before replacement')
+    runs[rid]={'run_id':rid,'started_at':time.time(),'baseline':[summary(p) for p in t.get('artifacts',[])]}
+    t.update(run_id=rid,status='running',status_changed_at=time.time())
+    for key in ('verification','report','report_intent','attention_required','probe_unknown_since'):
+        t.pop(key,None)
+
 def start_run(root, tid, run_id=None):
     rid = ident(run_id or uuid.uuid4().hex)
     with transaction(root) as reg:
         t = task(reg, tid)
-        if t.get('status') == 'reported': raise ValueError('reported task requires a new task')
+        if is_legacy(t): raise LegacyAdoptionRequired('legacy task requires adopt-legacy with inspection evidence')
+        if t.get('status') in ('reported','closed_legacy'): raise ValueError('closed task requires a new task')
         if t.get('iterations',0)>2: raise ValueError('rework limit exhausted; needs an explicit new task')
-        runs = t.setdefault('runs', {})
-        if rid in runs: raise ValueError('run exists')
-        if t.get('run_id') and t['runs'][t['run_id']].get('result_path') is None and t['status'] == 'running':
-            raise ValueError('active run requires reconciliation before replacement')
-        runs[rid] = {'run_id': rid, 'started_at': time.time(), 'baseline': [summary(p) for p in t.get('artifacts', [])]}
-        t.update(run_id=rid, status='running', status_changed_at=time.time())
-        for key in ('verification','report','report_intent','attention_required'): t.pop(key, None)
+        new_run(t,rid)
     return rid
+
+def resolve_legacy(root,tid,action,evidence,expected_hash,run_id=None):
+    """Explicit operator inspection; never backfill an old execution result."""
+    proof=summary(evidence); inspection=read(evidence)
+    if (not isinstance(inspection,dict) or inspection.get('task_id')!=tid or
+        inspection.get('task_hash')!=expected_hash or inspection.get('decision')!=action or
+        not isinstance(inspection.get('findings'),str) or not inspection['findings'].strip()):
+        raise ValueError('matching legacy inspection required')
+    refs=inspection.get('references',[])
+    if not isinstance(refs,list) or not refs: raise ValueError('inspection references required')
+    refs=[summary(p) for p in refs]
+    if any(r.get('size',0)<=0 for r in refs): raise ValueError('inspection reference unavailable')
+    rid=ident(run_id) if action=='adopt' and run_id else None
+    if action=='adopt' and not rid: raise ValueError('new run id required')
+    with transaction(root) as reg:
+        t=task(reg,tid)
+        if digest(t)!=expected_hash: raise ValueError('task changed; inspect again')
+        if not is_legacy(t): raise ValueError('not a legacy task')
+        if rid==t.get('run_id'): raise ValueError('adoption must use a new run id')
+        if action=='adopt' and (not t.get('acceptance') or t.get('iterations',0)>2): raise ValueError('acceptance or rework limit requires a new task')
+        mark_legacy(t)
+        t['legacy_resolution']={'action':action,'at':time.time(),'inspection':proof,'references':refs,'task_hash':expected_hash}
+        if action=='adopt':
+            if not isinstance(t.get('runs'),dict): t['runs']={}
+            t.pop('run_id',None);t['status']='registered';new_run(t,rid)
+        elif action=='close': t.update(status='closed_legacy',status_changed_at=time.time())
+        else: raise ValueError('invalid legacy action')
+    return {'task_id':tid,'status':'running' if action=='adopt' else 'closed_legacy','run_id':rid}
 
 def event_id(tid, rid, phase): return digest([tid, rid, phase])
 
@@ -175,8 +229,8 @@ def run_command(root, tid, rid, command):
     return commit_result(root,tid,rid,r)
 
 def probe(t, root, herdr=HERDR):
-    rid=t.get('run_id'); run=t.get('runs',{}).get(rid,{})
-    if not rid: return {'observed':'legacy_unproven'}
+    rid=t.get('run_id'); run=current_run(t)
+    if run is None: return {'observed':'legacy_unproven' if is_legacy(t) else 'not_started'}
     try: r=read(Path(root)/'runs'/t['id']/rid/'result.json')
     except (ValueError,OSError): return {'observed':'result_unreadable'}
     if r:
@@ -184,32 +238,52 @@ def probe(t, root, herdr=HERDR):
             or r.get('started_at')!=run.get('started_at')):
             return {'observed':'result_identity_mismatch'}
         return {'result':r}
+    expected=run.get('pid_identity'); live=pid_identity((expected or {}).get('pid'))
+    # A runner-owned live child takes precedence over UI status / CLI outages.
+    if run.get('runner_started') and expected:
+        return {'observed':'running' if live==expected else 'runner_exit_unknown','evidence':'runner_pid_birth'}
+    if run.get('runner_started') and time.time()-run['runner_started']<30:
+        return {'observed':'runner_starting'}
     if t.get('type')=='herdr':
         if not all(t.get(k) for k in ('agent_name','workspace_id','pane_id')): return {'observed':'missing_herdr_identity'}
         try:
             p=subprocess.run([str(herdr),'agent','get',t['agent_name']],capture_output=True,text=True,timeout=20,
               env=dict(os.environ, PATH=str(Path(herdr).parent)+':/usr/bin:/bin'))
-            data=json.loads(p.stdout)
-            if p.returncode or data.get('ok') is False: return {'observed':'herdr_error'}
-            # Terminal text can echo a prompt/marker: never establish success from it.
-            return {'observed':'herdr_unverified','snapshot_hash':digest(data)}
+            data=json.loads(p.stdout or p.stderr)
+            return herdr_observation(data,p.returncode,t)
         except (OSError,ValueError,subprocess.SubprocessError): return {'observed':'herdr_error'}
-    expected=run.get('pid_identity'); live=pid_identity((expected or {}).get('pid'))
     return {'observed':'running' if expected and live==expected else 'pid_missing_or_reused'}
+
+def herdr_observation(data,returncode,t):
+    # Installed `herdr api schema --json`: result.type=agent_info,
+    # result.agent.{agent_status,pane_id,workspace_id}; errors are on stderr.
+    if not isinstance(data,dict): return {'observed':'herdr_error'}
+    error=data.get('error',{})
+    if isinstance(error,dict) and error.get('code')=='agent_not_found': return {'observed':'herdr_not_found'}
+    if returncode or error or data.get('ok') is False: return {'observed':'herdr_error'}
+    result=data.get('result'); agent=result.get('agent') if isinstance(result,dict) else None
+    if not isinstance(agent,dict) or result.get('type')!='agent_info': return {'observed':'herdr_schema_unknown'}
+    if any(agent.get(k)!=t[k] for k in ('workspace_id','pane_id')): return {'observed':'herdr_identity_mismatch'}
+    status=agent.get('agent_status')
+    observed={'working':'running','running':'running','blocked':'herdr_blocked',
+      'done':'herdr_done_unverified','idle':'herdr_idle_unverified'}.get(status,'herdr_unknown')
+    return {'observed':observed,'agent_status':status if isinstance(status,str) else 'unknown','snapshot_hash':digest(data)}
 
 def reconcile(root, now=None, herdr=HERDR, after_probe=None):
     now=now or time.time(); snapshot=read(Path(root)/'registry.json',{'tasks':[]})
-    observations=[(t,probe(t,root,herdr)) for t in snapshot['tasks'] if t.get('status')!='reported']
+    observations=[(t,probe(t,root,herdr)) for t in snapshot['tasks'] if t.get('status') not in ('reported','closed_legacy')]
     if after_probe: after_probe()
     for old, obs in observations:
         with transaction(root) as reg:
             t=task(reg,old['id'])
             # Compare the probed task, then merge into the latest registry.
             if digest(t)!=digest(old): continue
+            if is_legacy(t): mark_legacy(t)
             t['last_checked']=now; t['observation']=obs.get('observed','result')
+            t['observation_evidence']={k:v for k,v in obs.items() if k!='result'}
             rid=t.get('run_id')
-            if not rid:
-                t.setdefault('legacy_status',t.get('status'))
+            if is_legacy(t):
+                mark_legacy(t)
                 if t.get('status') in ('running','dispatched','rework','done','blocked'):
                     t['status']='needs_reconciliation'
                 # No legacy notification replay. Migration is observable on inspection.
@@ -219,8 +293,21 @@ def reconcile(root, now=None, herdr=HERDR, after_probe=None):
                 t['runs'][rid]['result_path']=str(Path(root)/'runs'/t['id']/rid/'result.json')
                 if status!=t['status']: t.update(status=status,status_changed_at=now)
                 emit(reg,t,status,now)
-            elif t['status']=='running' and obs.get('observed')!='running':
+            elif obs.get('observed')=='herdr_blocked' and t['status'] in ('running','needs_reconciliation'):
+                t.update(status='blocked',status_changed_at=now,block_origin='herdr');emit(reg,t,'blocked',now)
+            elif obs.get('observed')=='running' and (t['status']=='needs_reconciliation' or (t.get('block_origin')=='herdr' and t['status']=='blocked')):
+                t.update(status='running',status_changed_at=now);t.pop('block_origin',None)
+            elif t['status']=='running' and obs.get('observed') in ('herdr_done_unverified','herdr_idle_unverified','runner_exit_unknown','pid_missing_or_reused','result_unreadable','result_identity_mismatch'):
                 t.update(status='needs_reconciliation',status_changed_at=now);emit(reg,t,'needs_reconciliation',now)
+            uncertain=obs.get('observed') in ('herdr_error','herdr_not_found','herdr_schema_unknown','herdr_identity_mismatch','herdr_unknown','missing_herdr_identity')
+            if uncertain:
+                since=t.setdefault('probe_unknown_since',now)
+                if now-since>=t.get('review_timeout',1800):
+                    t['attention_required']='observation_overdue';emit(reg,t,'observation_overdue',now)
+            else:
+                t.pop('probe_unknown_since',None)
+                if obs.get('observed')=='running' and t.get('attention_required') in ('observation_overdue','blocked_overdue','needs_reconciliation_overdue'):
+                    t.pop('attention_required',None)
             if t['status'] in ('done','ready_for_review','blocked','needs_reconciliation','verified','rework','batch_finished'):
                 since=t.setdefault('status_changed_at',now)
                 if now-since>=t.get('review_timeout',1800):
@@ -251,7 +338,8 @@ def claim(root, owner, now=None):
     with transaction(root,'inbox.json') as box:
         for e in box.values():
             if not route_matches(e.get('route',{}),owner) or e['state']=='handled': continue
-            if e.get('next_at',0)>now: continue
+            changed_branch=e['state']=='needs_attention' and any(e.get('attention_owner',{}).get(k)!=owner.get(k) for k in ('session_id','leaf_id'))
+            if e.get('next_at',0)>now and not changed_branch: continue
             if e['state'] in ('claimed','enqueued') and e.get('lease_until',0)>now: continue
             # Redelivery after crash is at least once, with the same event id.
             e.update(state='claimed',claim_id=uuid.uuid4().hex,owner=owner,lease_until=now+120,attempts=e['attempts']+1)
@@ -268,7 +356,33 @@ def receipt(root,eid,cid,state,evidence=None):
         if e['state']=='handled': return
         e.update(state=state,receipt=proof if state=='handled' else evidence,updated_at=time.time())
         if state=='pending': e['next_at']=time.time()+min(3600,5*2**min(e['attempts'],9))
-        if state=='enqueued': e['lease_until']=time.time()+1800
+        if state=='enqueued':
+            e.setdefault('first_enqueued_at',time.time())
+            e['lease_until']=time.time()+1800
+
+def observe_input(root,eid,cid,entry_id,session_id,recovery_entry_id=None,entry_at=None,now=None):
+    """Persisted input proves admission only. One stable recovery prompt per branch.
+    A persisted recovery without handled proof becomes visible needs_attention;
+    it cannot renew enqueued forever or automatically repeat business side effects.
+    """
+    now=now or time.time()
+    with transaction(root,'inbox.json') as box:
+        e=box[eid]
+        if e.get('claim_id')!=cid: raise ValueError('stale claim')
+        if e['state']=='handled': return {'action':'handled'}
+        if e.get('owner',{}).get('session_id')!=session_id: raise ValueError('session mismatch')
+        e['observed_input']={'entry_id':entry_id,'session_id':session_id,'at':now}
+        e.setdefault('first_enqueued_at',min(now,entry_at) if entry_at is not None and entry_at>0 else now)
+        deadline=e['first_enqueued_at']+e.get('handling_timeout',1800)
+        if now<deadline:
+            e.update(state='enqueued',lease_until=deadline)
+            return {'action':'defer','deadline':deadline}
+        if recovery_entry_id:
+            e.update(state='needs_attention',attention_required='handling_unconfirmed',
+              recovery_entry_id=recovery_entry_id,attention_owner=e['owner'],next_at=now+3600)
+            return {'action':'attention'}
+        e.update(attention_required='handling_overdue',recovery_requested_at=e.get('recovery_requested_at',now))
+        return {'action':'recover'}
 
 def drain(root, sender, now=None):
     now=now or time.time()
@@ -383,8 +497,12 @@ def main():
     sub.add_parser('reconcile');sub.add_parser('inspect');sub.add_parser('migrate')
     s=sub.add_parser('migrate-spool');s.add_argument('directory')
     s=sub.add_parser('update');s.add_argument('task_id');s.add_argument('--delta',required=True);s.add_argument('--expected-hash',required=True)
+    for name in ('adopt-legacy','close-legacy'):
+        s=sub.add_parser(name);s.add_argument('task_id');s.add_argument('--evidence',required=True);s.add_argument('--expected-hash',required=True)
+        if name=='adopt-legacy': s.add_argument('--run-id',required=True)
     s=sub.add_parser('claim');s.add_argument('--owner',required=True)
     s=sub.add_parser('ack');s.add_argument('event_id');s.add_argument('claim_id');s.add_argument('state');s.add_argument('--evidence')
+    s=sub.add_parser('observe-input');s.add_argument('event_id');s.add_argument('claim_id');s.add_argument('--entry-id',required=True);s.add_argument('--session-id',required=True);s.add_argument('--recovery-entry-id');s.add_argument('--entry-at',type=float)
     s=sub.add_parser('verify');s.add_argument('task_id');s.add_argument('run_id');s.add_argument('--evidence',required=True);s.add_argument('--reject',action='store_true')
     s=sub.add_parser('report');s.add_argument('task_id');s.add_argument('run_id');s.add_argument('--receipt',required=True)
     s=sub.add_parser('prepare-report');s.add_argument('task_id');s.add_argument('run_id');s.add_argument('--target',required=True)
@@ -397,22 +515,27 @@ def main():
     elif a.cmd=='reconcile': reconcile(a.root)
     elif a.cmd=='claim': result=claim(a.root,json.loads(a.owner))
     elif a.cmd=='ack': receipt(a.root,a.event_id,a.claim_id,a.state,a.evidence)
+    elif a.cmd=='observe-input': result=observe_input(a.root,a.event_id,a.claim_id,a.entry_id,a.session_id,a.recovery_entry_id,a.entry_at)
     elif a.cmd=='verify': verify(a.root,a.task_id,a.run_id,a.evidence,not a.reject)
     elif a.cmd=='report': report(a.root,a.task_id,a.run_id,read(a.receipt))
     elif a.cmd=='prepare-report': result=prepare_report(a.root,a.task_id,a.run_id,a.hash or delivery_hash(Path(a.text_file).read_text()),json.loads(a.target))
     elif a.cmd=='migrate-spool': result=migrate_spool(a.root,a.directory)
     elif a.cmd=='update': update_metadata(a.root,a.task_id,read(a.delta),a.expected_hash)
+    elif a.cmd in ('adopt-legacy','close-legacy'): result=resolve_legacy(a.root,a.task_id,'adopt' if a.cmd=='adopt-legacy' else 'close',a.evidence,a.expected_hash,getattr(a,'run_id',None))
     elif a.cmd=='migrate':
         with transaction(a.root) as reg:
             for t in reg['tasks']:
-                if not t.get('run_id'): t.setdefault('legacy_status',t.get('status'));t.setdefault('migration','needs_reconciliation_no_replay')
+                if is_legacy(t): mark_legacy(t)
     elif a.cmd=='inspect':
         result={'registry':read(a.root/'registry.json',{}),'inbox':{}}
+        result['task_hashes']={t['id']:digest(t) for t in result['registry'].get('tasks',[])}
         for eid,e in read(a.root/'inbox.json',{}).items():
             result['inbox'][eid]={k:v for k,v in e.items() if k not in ('text','source')}
     print(json.dumps(result,ensure_ascii=False))
 
 if __name__=='__main__':
     try: main()
+    except LegacyAdoptionRequired:
+        print(json.dumps({'error':'legacy_adoption_required','next':'inspect, then adopt-legacy with inspection evidence and expected-hash'}),file=sys.stderr);sys.exit(1)
     except Exception as e:
         print(json.dumps({'error':type(e).__name__}),file=sys.stderr);sys.exit(1)

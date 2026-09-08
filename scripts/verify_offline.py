@@ -4,7 +4,7 @@ import argparse, json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
 from apply_delivery_patch import apply
 REPO=Path(__file__).resolve().parents[1]
-p=argparse.ArgumentParser();p.add_argument('--evidence',type=Path,default=Path.home()/'artifacts/2026-09-08/pi-delivery-watchdog-fix');a=p.parse_args();a.evidence.mkdir(parents=True,exist_ok=True)
+p=argparse.ArgumentParser();p.add_argument('--evidence',type=Path,default=Path.home()/'artifacts/2026-09-08/pi-delivery-watchdog-fix/rework-1');a=p.parse_args();a.evidence.mkdir(parents=True,exist_ok=True)
 source=Path.home()/'.pi/agent/npm/node_modules/@llblab/pi-telegram'
 node=Path.home()/'.nvm/versions/node/v24.19.0/bin/node'
 with tempfile.TemporaryDirectory(prefix='pi-fix-offline-') as d:

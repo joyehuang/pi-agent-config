@@ -25,7 +25,7 @@ try {
  const e=Object.values(read('registry.json').outbox)[0];
  assert.equal(e.targets.agent.state,'success');assert.equal(e.targets.telegram.state,'unknown');
  globalThis[key]=()=>owner;
- const context={isIdle:()=>true,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>owner.session_id,getEntries:()=>[]}};
+ const context={isIdle:()=>true,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>owner.session_id,getBranch:()=>[],getLeafId:()=>null}};
  const pi={on:(n,cb)=>hooks[n]=cb,exec:async(cmd,args)=>{const r=await exec(cmd,args);return {...r,code:0}},sendUserMessage:text=>injected.push(text)};
  const relay=createRelay(pi,{isMain:()=>true,root,script});hooks.session_start({},context);await relay.collect();hooks.session_shutdown();
  assert.equal(injected.length,1);assert.ok(injected[0].includes(e.event_id));assert.ok(injected[0].includes(e.result_path));

@@ -30,3 +30,15 @@
 - 部署、回滚、版本/本地补丁：fixed；covered offline。精确 Pi/bridge 版本和内容 hash，混合/漂移基线拒绝；完整隔离 home 安装、重复安装、回滚及冲突阻断。保留现有 footer/recovery 源码。只读 plan 不改生产；须主 agent 先验收，暂停旧 watchdog writer、安装、监督主 Pi 重启、迁移/对账后恢复调度。回滚保留新私有状态，不安全重放通知。
 
 剩余生产验收包括：真实 Pi 插件生命周期与 owner 交接、实际 Telegram send/edit/message_id/线程归属、使用中的历史 writer 迁移与验收超时响应、主 agent 授权后续动作。当前没有真实模型/Telegram/QQ 测试，没有历史重复消息逐对 message_id 归因。安装基线 standalone TypeScript 已有诊断，本补丁验的是无新增诊断，不声称全包 typecheck 全绿。完整命令、测试输出和限制见交接说明及本地实现报告。
+
+
+## 独立验收返工 1（替代相关首轮覆盖结论）
+
+首轮 commit 697b6a3 的原离线测试通过，不等于下列遗漏已经覆盖。主 agent 独立证据 review-herdr-working.json 证明工作中 herdr 被误标 needs_reconciliation。本节如实修正首轮结论；父目录原 result/commit/证据保留，新证据在 rework-1。
+
+- R1 herdr 实际嵌套 schema：fixed / covered offline / production pending。官方 CLI 导出 AgentInfo/AgentStatus schema 和脱敏 agent get 输出为 fixture 来源；working/running、blocked→working、done/idle 无结果、unknown/not-found、错误 schema、错误 pane/workspace、CLI PATH/失败均分别处理。runner 的真实 PID 出生身份优先，退出仍必须以实际结果为准。未知观察持久保存，超时单一事件；不立即把活跃任务判完成/失败。
+- R2 有 run_id 无有效 runs 的 legacy：fixed / covered offline / production pending。migrate/reconcile 保留旧字段/快照且不重放；start-run 给出 adopt 要求，不再 KeyError。真实 CLI adopt-legacy 新建执行身份，close-legacy 以 inspection 和引用摘要显式归档，无伪造结果/退出码/成功状态；CAS 拒绝过期 inspection。覆盖缺映射、null、空/不完整 metadata、旧字段保留、重复/非法迁移与缺引用。
+- R3 全树输入误抑制：fixed / covered offline / production pending。真实 Pi SessionManager 创建临时会话、重开文件、branch 导航；只查当前 getBranch，不把不活跃兄弟分支当已注入。已持久化但未处理的原 deadline 不会滚动延期；超时产生稳定恢复提示，提示后崩溃的未知 ACK 不重复提示，仍缺 handled proof 则持久 needs_attention。新分支可重新评估；处理 proof 跨分支有效；保留用户 quiet window、忙时队列和 shutdown 清理。
+- R4 实际 QQ stdout 调用者：fixed / covered offline / production pending。QQ handoff 严格接受 queued DIGITS-DIGITS.json，新增 durable legacy_receipt 映射恢复该契约；显式结构化/--json 调用维持新协议 JSON。直接可执行、python、python -u、TEXT/SOURCE、多行文本、NOTIFY_PROFILE 和非零配置失败均覆盖。测试不运行外部业务脚本，不产生真实发送。
+- 调用者核对：covered read-only。检查 ~/bin、~/dev（排除依赖/构建）、在线 extensions、LaunchAgents、相关 skill 指令，并补充 HOME 代码文件搜索；没有发现其他直接 spool writer。私有 caller-inventory.json 仅存路径/调用位置/契约分类。residual：未遍历原始会话、历史 artifact、依赖/缓存或不可读 Trash；动态拼接/未落盘命令不可能用静态搜索穷尽。部分现有调用者忽略失败或独立设置更短 timeout，其可靠性不等于本轮 CLI 兼容，不能宣称全部迁移完成。
+- 原 sender/bridge patch 未修改，原 19 项和所有新增回归一起运行；仍验证补丁前自主→用户双发送、修后一次、跨线程、bus ACK unknown 等原边界。部署必须接受返工后的新 commit，不接受旧 commit 代替。生产 before hash 再次核验，运行时重启/上线仍由主 agent 负责。

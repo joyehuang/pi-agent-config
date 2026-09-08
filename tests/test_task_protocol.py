@@ -69,7 +69,7 @@ class Protocol(unittest.TestCase):
   self.setup_run()
   with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p')
   self.assertEqual(p.probe(self.reg()['tasks'][0],self.root,self.root/'missing')['observed'],'herdr_error')
-  p.reconcile(self.root,herdr=self.root/'missing');self.assertEqual(self.reg()['tasks'][0]['status'],'needs_reconciliation')
+  p.reconcile(self.root,herdr=self.root/'missing');self.assertEqual(self.reg()['tasks'][0]['status'],'running');self.assertEqual(self.reg()['tasks'][0]['observation'],'herdr_error')
   p.commit_result(self.root,'t','r',self.result())
   p.reconcile(self.root,now=time.time()+3600);p.reconcile(self.root,now=time.time()+7200)
   self.assertEqual(sum(e['phase']=='review_overdue' for e in self.reg()['outbox'].values()),1)
@@ -132,9 +132,9 @@ class FaultInjection(unittest.TestCase):
   original=p.pid_identity;p.pid_identity=lambda pid:{'pid':123,'birth':'new'}
   try:self.assertEqual(p.probe(self.reg()['tasks'][0],self.root)['observed'],'pid_missing_or_reused')
   finally:p.pid_identity=original
-  fake=self.root/'herdr';fake.write_text('#!/bin/sh\nprintf \'{"ok":true,"result":{"agent_status":"done","prompt":"DONE_FIXTURE"}}\\n\'\n');fake.chmod(0o700)
+  fake=self.root/'herdr';fake.write_text('#!/bin/sh\nprintf \'{"result":{"type":"agent_info","agent":{"agent_status":"done","workspace_id":"w","pane_id":"p","prompt":"DONE_FIXTURE"}}}\\n\'\n');fake.chmod(0o700)
   with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p')
-  obs=p.probe(self.reg()['tasks'][0],self.root,fake);self.assertEqual(obs['observed'],'herdr_unverified')
+  obs=p.probe(self.reg()['tasks'][0],self.root,fake);self.assertEqual(obs['observed'],'herdr_done_unverified')
   p.reconcile(self.root,herdr=fake);self.assertEqual(self.reg()['tasks'][0]['status'],'needs_reconciliation')
  def test_outbox_crash_lease_and_duplicate_delivery(self):
   self.setup_run();p.commit_result(self.root,'t','r',self.result())
