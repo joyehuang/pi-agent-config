@@ -1,0 +1,391 @@
+--- a/lib/activity.ts
++++ b/lib/activity.ts
+@@ -416,8 +416,9 @@
+     recordInputSource(source) {
+       getRuntime()?.recordInputSource(source);
+     },
+-    onAgentStart(target) {
+-      getRuntime()?.onAgentStart(target);
++    getActivityId: () => getRuntime()?.getActivityId?.(),
++    onAgentStart(target, request) {
++      getRuntime()?.onAgentStart(target, request);
+     },
+     onAssistantEvent(event) {
+       getRuntime()?.onAssistantEvent(event);
+@@ -443,8 +444,8 @@
+     onAgentEnd() {
+       getRuntime()?.onAgentEnd();
+     },
+-    onAgentSettled() {
+-      getRuntime()?.onAgentSettled();
++    onAgentSettled(expectedId) {
++      getRuntime()?.onAgentSettled(expectedId);
+     },
+     onSessionShutdown() {
+       runtime?.onSessionShutdown();
+@@ -477,7 +478,8 @@
+ export interface TelegramActivityRuntime {
+   onSessionStart?: () => void;
+   recordInputSource: (source: TelegramActivityInputSource) => void;
+-  onAgentStart: (activeTelegramTarget?: TelegramActivityTarget) => void;
++  onAgentStart: (activeTelegramTarget?: TelegramActivityTarget, request?: object) => void;
++  getActivityId?: () => string | undefined;
+   onAssistantEvent: (event: TelegramAssistantStreamEvent) => void;
+   onToolStart: (event: {
+     toolCallId: string;
+@@ -503,7 +505,7 @@
+   ) => void;
+   onCompactionAbandoned: () => void;
+   onAgentEnd: () => void;
+-  onAgentSettled: () => void;
++  onAgentSettled: (expectedId?: string) => void;
+   onSessionShutdown: () => void;
+ }
+ 
+@@ -529,6 +531,9 @@
+   let activitySource: TelegramActivitySource = "unknown";
+   let activityTarget: TelegramActivityTarget | undefined;
+   let sequence = 0;
++  let currentRequest: object | undefined;
++  let ended = false;
++  let hasInput = false;
+   let pendingInputSource: TelegramActivityInputSource = "unknown";
+   let pendingAssistantSegment: PendingAssistantSegment | undefined;
+   let compactionInProgress = false;
+@@ -601,11 +606,25 @@
+     if (shouldClearActivity) clearActivity();
+   };
+   return {
++    getActivityId: () => activityId,
+     recordInputSource(source) {
+       pendingInputSource = source;
+-    },
+-    onAgentStart(activeTelegramTarget) {
++      hasInput = true;
++    },
++    onAgentStart(activeTelegramTarget, request) {
+       abandonCompaction();
++      // Current queue turn is ownership evidence. Retry of the same turn keeps
++      // identity; a new turn cannot inherit an unfinished autonomous activity.
++      const targetChanged = JSON.stringify(activeTelegramTarget) !== JSON.stringify(activityTarget);
++      if (activityId && (targetChanged || (request && request !== currentRequest) ||
++          (!request && ended && hasInput))) {
++        flushPendingSegment("terminal-partial");
++        emit({ type: "agent-settled" });
++        clearActivity();
++      }
++      currentRequest = request;
++      ended = false;
++      hasInput = false;
+       ensureActivity(activeTelegramTarget);
+       emit({ type: "agent-start" });
+     },
+@@ -686,10 +705,11 @@
+       abandonCompaction();
+     },
+     onAgentEnd() {
++      ended = true;
+       if (activityId) emit({ type: "agent-end" });
+     },
+-    onAgentSettled() {
+-      if (!activityId) return;
++    onAgentSettled(expectedId) {
++      if (!activityId || (expectedId !== undefined && expectedId !== activityId)) return;
+       flushPendingSegment("terminal-partial");
+       emit({ type: "agent-settled" });
+       clearActivity();
+--- a/lib/bindings.ts
++++ b/lib/bindings.ts
+@@ -26,6 +26,36 @@
+ import * as Status from "./status.ts";
+ import { withTelegramSendContext } from "./send-queue.ts";
+ import * as TelegramApi from "./telegram-api.ts";
++
++export function bindTelegramRelayOwner(pi: Pi.ExtensionAPI, ports: {
++  owns: () => boolean;
++  getTarget: () => {chatId: number; threadId?: number} | undefined;
++  getProfile: () => string | undefined;
++  getEpoch: () => string | number | undefined;
++  generation: string;
++  hasWork: () => boolean;
++}) {
++  const key = Symbol.for("joye.pi-telegram.relay-owner.v1");
++  let context: Pi.ExtensionContext | undefined;
++  const port = () => {
++    const ctx = context;
++    if (!ctx || ctx.mode !== "tui" || !ports.owns()) return undefined;
++    const target = ports.getTarget();
++    if (!target) return undefined;
++    return { pid: process.pid, profile: ports.getProfile() ?? "default",
++      session_id: ctx.sessionManager.getSessionId(), target,
++      generation: ports.generation, epoch: ports.getEpoch(),
++      idle: ctx.isIdle() && !ctx.hasPendingMessages() && !ports.hasWork() };
++  };
++  pi.on("session_start", (_event, ctx) => {
++    context = ctx;
++    (globalThis as any)[key] = port;
++  });
++  pi.on("session_shutdown", () => {
++    context = undefined;
++    if ((globalThis as any)[key] === port) delete (globalThis as any)[key];
++  });
++}
+ 
+ type ActivePiModel = NonNullable<Pi.ExtensionContext["model"]>;
+ 
+@@ -79,7 +109,7 @@
+     async send(event, authority, isAuthorityActive) {
+       await deps.waitForActivityIdle?.();
+       if (!isAuthorityActive()) return;
+-      await withTelegramSendContext({ priority: "background", isActive: isAuthorityActive },
++      await withTelegramSendContext({ priority: "background", isActive: isAuthorityActive, activityId: event.activityId, requestId: event.activityId, route: "assistant-output", source: event.source, placement: event.placement, target: authority.target },
+         () => sendOutput(event, authority, isAuthorityActive));
+     },
+     recordFailure(event, error) {
+@@ -697,7 +727,12 @@
+     async onAgentStart(event, ctx) {
+       if (!isSessionContextActive(ctx)) return;
+       await agentStartWithDedupReset(event, ctx);
+-      activityRuntime.onAgentStart(activeTurnRuntime.get()?.target);
++      activityRuntime.onAgentStart(activeTurnRuntime.get()?.target, activeTurnRuntime.get());
++      const ownedTurn = activeTurnRuntime.get();
++      if (ownedTurn) {
++        ownedTurn.deliveryActivityId = activityRuntime.getActivityId?.();
++        ownedTurn.deliveryRequestId ??= ownedTurn.deliveryActivityId;
++      }
+       startAgentActivityTypingLoop(ctx);
+     },
+     async onToolExecutionStart(event, ctx) {
+@@ -747,8 +782,9 @@
+     },
+     async onAgentSettled(event, ctx) {
+       if (!isSessionContextActive(ctx)) return;
++      const settlingActivity = activityRuntime.getActivityId?.();
+       await agentLifecycleHooks.onAgentSettled(event, ctx);
+-      activityRuntime.onAgentSettled();
++      if (ctx.isIdle()) activityRuntime.onAgentSettled(settlingActivity);
+       modelContextAvailabilityRuntime.reconcile();
+     },
+     onBeforeAgentStart: Prompts.createTelegramProactiveBeforeAgentStartHook({
+--- a/lib/outbound.ts
++++ b/lib/outbound.ts
+@@ -884,9 +884,11 @@
+         ? [{ text: plan.voiceText, lang: plan.lang, rate: plan.rate }]
+         : [];
+ 
++    if (!voiceReplies.some((reply) => reply.text?.trim())) return;
+     let anyDelivered = false;
+ 
+     for (const reply of voiceReplies) {
++      if (!reply.text?.trim()) continue;
+       try {
+         await sendVoiceReply(turn, reply.text, {
+           lang: reply.lang ?? plan.lang,
+--- a/lib/send-queue.ts
++++ b/lib/send-queue.ts
+@@ -5,7 +5,7 @@
+  */
+ import { AsyncLocalStorage } from "node:async_hooks";
+ import { createHash, randomUUID } from "node:crypto";
+-import { mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
++import { appendFileSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ import { resolveTelegramTempDir } from "./paths.ts";
+ 
+@@ -13,10 +13,34 @@
+   priority: "final" | "background";
+   isActive: () => boolean;
+   originalText?: string;
++  requestId?: string;
++  activityId?: string;
++  route?: string;
++  placement?: string;
++  source?: string;
++  target?: {chatId: number; threadId?: number};
++  replyTo?: number;
+ }
+ const context = new AsyncLocalStorage<SendContext>();
+ export function withTelegramSendContext<T>(value: SendContext, work: () => T): T {
+   return context.run(value, work);
++}
++
++export interface TelegramSendCorrelation {
++  requestId?: string; activityId?: string; route?: string; source?: string; placement?: string; replyTo?: number;
++}
++export function parseTelegramSendCorrelation(value: unknown): TelegramSendCorrelation {
++  const out: TelegramSendCorrelation = {};
++  if (!value || typeof value !== "object") return out;
++  const data = value as Record<string, unknown>;
++  for (const key of ["requestId", "activityId", "route", "source", "placement"] as const) {
++    if (typeof data[key] === "string" && data[key].length <= 256) out[key] = data[key];
++  }
++  if (typeof data.replyTo === "number" && Number.isSafeInteger(data.replyTo)) out.replyTo = data.replyTo;
++  return out;
++}
++export function getTelegramSendCorrelation(): TelegramSendCorrelation {
++  return parseTelegramSendCorrelation(context.getStore());
+ }
+ 
+ export interface SendScope {
+@@ -141,6 +165,23 @@
+       const path = join(options.directory, filename);
+       const durable = journaled.has(method);
+       const started = now();
++      const deliveryId = randomUUID();
++      const ledger = (status: string, messageId?: unknown) => {
++        if (ephemeral) return;
++        try {
++          mkdirSync(options.directory, { recursive: true, mode: 0o700 });
++          appendFileSync(join(options.directory, "delivery-ledger.jsonl"), JSON.stringify({
++            timestamp: now(), delivery_id: deliveryId, request_id: captured?.requestId ?? null,
++            activity_id: captured?.activityId ?? null, route: captured?.route ?? "transport", placement: captured?.placement ?? null,
++            source: captured?.source ?? "unknown", profile: scope.profile,
++            target: body.chat_id ?? captured?.target?.chatId ?? null, thread: body.message_thread_id ?? captured?.target?.threadId ?? null,
++            reply_to: (body.reply_parameters as { message_id?: number })?.message_id ?? captured?.replyTo ?? null,
++            hash: createHash("sha256").update(JSON.stringify(body.text ?? body.rich_message ?? body.caption ?? "")).digest("hex"),
++            operation: method.startsWith("edit") ? "edit" : "send", method,
++            message_id: messageId ?? body.message_id ?? null, status,
++          }) + "\n", { mode: 0o600 });
++        } catch { options.record("outbound", "Delivery ledger unavailable", { method }); }
++      };
+       let knownNotCommitted = true;
+       let retrying = false;
+       const persist = (status: string, details: Record<string, unknown> = {}) => {
+@@ -191,8 +232,10 @@
+               // instruction to replay automatically in another Pi session.
+               persist("in-flight");
+               knownNotCommitted = false;
++              ledger("unknown");
+               try {
+                 const result = await request();
++                ledger(typeof (result as { message_id?: number })?.message_id === "number" || method.startsWith("edit") ? "success" : "unknown", (result as { message_id?: number })?.message_id);
+                 if (durable) {
+                   try {
+                     persist("confirmed", { receipt: result });
+@@ -210,6 +253,7 @@
+                 resolve(result);
+               } catch (error) {
+                 const response = error as { status?: number; retryAfterSeconds?: number; name?: string };
++                ledger(response.name === "TelegramApiCommitUnknownError" || !response.status || response.status >= 500 ? "unknown" : "failure");
+                 if (response.status === 429) {
+                   knownNotCommitted = true;
+                   retrying = true;
+--- a/lib/queue.ts
++++ b/lib/queue.ts
+@@ -94,6 +94,8 @@
+ }
+ 
+ export interface PendingTelegramTurn extends TelegramQueueItemBase {
++  deliveryRequestId?: string;
++  deliveryActivityId?: string;
+   kind: "prompt";
+   sourceMessageIds: number[];
+   queuedAttachments: QueuedAttachment[];
+@@ -1586,6 +1588,7 @@
+   }
+   const deliverActiveTurn = () => withTelegramSendContext({
+     priority: "final", isActive: isDeliveryActive, originalText: finalText,
++    requestId: turn.deliveryRequestId, activityId: turn.deliveryActivityId, route: "queue", source: "telegram", placement: "final", target: turn.target, replyTo: turn.replyToMessageId,
+   }, async () => {
+     await deps.waitForActivityIdle?.();
+     if (!isDeliveryActive()) return;
+--- a/index.ts
++++ b/index.ts
+@@ -623,6 +623,16 @@
+     });
+   const getQueueItemCount =
+     Queue.createTelegramQueueItemCountGetter(telegramQueueStore);
++  Bindings.bindTelegramRelayOwner(pi, {
++    owns: lockRuntime.owns,
++    getTarget: () => telegramBusLeaderState.getTarget() ??
++      (configStore.getAllowedUserId() ? {chatId: configStore.getAllowedUserId()!} : undefined),
++    getProfile: configStore.getActiveProfileName,
++    getEpoch: lockRuntime.getOwnedLeaderEpoch,
++    generation: deliveryGenerationSeed,
++    hasWork: () => activeTurnRuntime.has() || lifecycle.hasDispatchPending() ||
++      lifecycle.isCompactionInProgress() || getQueueItemCount() > 0,
++  });
+   const getPromptTemplateCommands =
+     PromptTemplates.createTelegramPromptTemplateCommandGetter({
+       getCommands,
+--- a/lib/bus.ts
++++ b/lib/bus.ts
+@@ -460,6 +460,8 @@
+   text: string;
+ }
+ 
++import { parseTelegramSendCorrelation, type TelegramSendCorrelation } from "./send-queue.ts";
++
+ export type TelegramBusEnvelope = (
+   | {
+       kind: "follower.register";
+@@ -541,6 +543,7 @@
+     }
+   | {
+       kind: "follower.callApi";
++      delivery?: TelegramSendCorrelation;
+       requestId: string;
+       instanceId: string;
+       registrationGeneration?: string;
+@@ -1706,6 +1709,7 @@
+     typeof value.sentAtMs === "number"
+     ? {
+         kind: "follower.callApi",
++        delivery: parseTelegramSendCorrelation(value.delivery),
+         requestId,
+         instanceId: value.instanceId,
+         ...(typeof value.registrationGeneration === "string"
+--- a/lib/bus-follower.ts
++++ b/lib/bus-follower.ts
+@@ -7,6 +7,7 @@
+  */
+ 
+ import { basename } from "node:path";
++import { getTelegramSendCorrelation } from "./send-queue.ts";
+ 
+ import * as Sync from "./sync.ts";
+ import * as Threads from "./threads.ts";
+@@ -855,6 +856,7 @@
+         }),
+         envelope: {
+           kind: "follower.callApi",
++          delivery: getTelegramSendCorrelation(),
+           requestId: deps.createRequestId(),
+           auth: deps.getAuthSecret?.(),
+           instanceId: deps.instanceId,
+--- a/lib/bus-leader.ts
++++ b/lib/bus-leader.ts
+@@ -6,6 +6,7 @@
+  */
+ 
+ import * as Sync from "./sync.ts";
++import { withTelegramSendContext, parseTelegramSendCorrelation } from "./send-queue.ts";
+ import * as ThreadReconciler from "./thread-reconciler.ts";
+ import {
+   isTelegramApiCommitUnknownError,
+@@ -1444,7 +1445,7 @@
+   }
+ }
+ 
+-async function handleFollowerApiCall(
++export async function handleFollowerApiCall(
+   envelope: Extract<TelegramBusEnvelope, { kind: "follower.callApi" }>,
+   deps: {
+     followerRegistry: TelegramBusFollowerRegistry;
+@@ -1503,7 +1504,15 @@
+     };
+   }
+   try {
+-    const result = await deps.callApi(envelope.method, envelope.args);
++    const correlation = parseTelegramSendCorrelation(envelope.delivery);
++    const result = await withTelegramSendContext({
++      ...correlation, priority: correlation.route === "queue" ? "final" : "background",
++      target: follower.target,
++      isActive: () => {
++        const current = deps.followerRegistry.get(envelope.instanceId);
++        return !!current && current.registrationGeneration === follower.registrationGeneration;
++      },
++    }, () => deps.callApi!(envelope.method, envelope.args));
+     recordFollowerApiMessageOwnership({
+       envelope,
+       follower,

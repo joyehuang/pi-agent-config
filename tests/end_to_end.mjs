@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {createRelay} from '../extensions/relay-notify.ts';
+const exec=promisify(execFile),root=fs.mkdtempSync(path.join(os.tmpdir(),'task-chain-'));
+const script=path.resolve('scripts/task_protocol.py'),notify=path.resolve('scripts/notify-agent.py');
+const run=async args=>JSON.parse((await exec('/usr/bin/python3',[script,'--root',root,...args])).stdout);
+const read=name=>JSON.parse(fs.readFileSync(path.join(root,name),'utf8'));
+const fixture=(name,data)=>{const p=path.join(root,name);fs.writeFileSync(p,typeof data==='string'?data:JSON.stringify(data),{mode:0o600});return p};
+const target={chatId:123,threadId:2},owner={pid:process.pid,profile:'personal',session_id:'main',target,generation:'g',epoch:'1',idle:true};
+const key=Symbol.for('joye.pi-telegram.relay-owner.v1');
+let hooks={},injected=[];
+try {
+ const spec=fixture('spec.json',{instruction:'offline fixture',acceptance:'artifact says verified fixture',artifacts:[path.join(root,'artifact')],done_marker:'DONE_CHAIN',route:{profile:'personal',target}});
+ await run(['register','chain','--spec',spec]);await run(['start-run','chain','--run-id','r1']);
+ const worker=fixture('worker.py',`import os,json,pathlib\npathlib.Path(${JSON.stringify(path.join(root,'artifact'))}).write_text('verified fixture')\npathlib.Path(os.environ['TASK_RESULT_PATH']).write_text(json.dumps(dict(task_id='chain',run_id='r1',reason='goal_complete')))\nprint('DONE_CHAIN')\n`);
+ await run(['run','chain','r1','--','/usr/bin/python3',worker]);
+ assert.equal(read('registry.json').tasks[0].status,'ready_for_review');
+ // Same production drain and legacy notifier, only the transport boundary is fake.
+ const drainCode=`import sys,subprocess,json\nsys.path.insert(0,${JSON.stringify(path.resolve('scripts'))})\nfrom task_protocol import drain\ndef send(target,e):\n if target=='telegram': return dict(state='unknown',reason='simulated_unknown_ack')\n p=subprocess.run([sys.executable,${JSON.stringify(notify)},'待验收','fixture','--root',${JSON.stringify(root)},'--event-id',e['event_id'],'--task-id',e['task_id'],'--run-id',e['run_id'],'--result-path',e['result_path'],'--route',json.dumps(e['route'])],capture_output=True,text=True,check=True)\n return json.loads(p.stdout)\ndrain(${JSON.stringify(root)},send)\n`;
+ await exec('/usr/bin/python3',['-c',drainCode]);
+ const e=Object.values(read('registry.json').outbox)[0];
+ assert.equal(e.targets.agent.state,'success');assert.equal(e.targets.telegram.state,'unknown');
+ globalThis[key]=()=>owner;
+ const context={isIdle:()=>true,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>owner.session_id,getEntries:()=>[]}};
+ const pi={on:(n,cb)=>hooks[n]=cb,exec:async(cmd,args)=>{const r=await exec(cmd,args);return {...r,code:0}},sendUserMessage:text=>injected.push(text)};
+ const relay=createRelay(pi,{isMain:()=>true,root,script});hooks.session_start({},context);await relay.collect();hooks.session_shutdown();
+ assert.equal(injected.length,1);assert.ok(injected[0].includes(e.event_id));assert.ok(injected[0].includes(e.result_path));
+ assert.equal(read('inbox.json')[e.event_id].state,'enqueued');
+ assert.equal(fs.readFileSync(path.join(root,'artifact'),'utf8'),'verified fixture');
+ const review=fixture('review.txt','Independent fixture review: read artifact and checked expected value.');
+ await run(['verify','chain','r1','--evidence',review]);
+ const body=fixture('final.txt','已验收：offline fixture');
+ await run(['prepare-report','chain','r1','--text-file',body,'--target',JSON.stringify(target)]);
+ const config=fixture('fake-config.json',{profiles:{personal:{botToken:'FAKE_OFFLINE_ONLY',allowedUserId:123}}});
+ const sendCode=`import sys,importlib.util,json,pathlib\nsys.path.insert(0,${JSON.stringify(path.resolve('scripts'))})\ns=importlib.util.spec_from_file_location('notify',${JSON.stringify(path.resolve('scripts/notify-telegram.py'))});m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nclass Response:\n status=200\n def __enter__(self):return self\n def __exit__(self,*args):pass\n def read(self):return b'{"ok":true,"result":{"message_id":42}}'\nr=m.durable_send(${JSON.stringify(root)},'chain-final',pathlib.Path(${JSON.stringify(body)}).read_text(),${JSON.stringify(config)},'personal',lambda *a,**kw:Response(),target=json.loads(${JSON.stringify(JSON.stringify(target))}))\nr['event_id']='chain-final'\nprint(json.dumps(r))\n`;
+ const receipt=JSON.parse((await exec('/usr/bin/python3',['-c',sendCode])).stdout);
+ await run(['report','chain','r1','--receipt',fixture('receipt.json',receipt)]);
+ const claim=read('inbox.json')[e.event_id];await run(['ack',e.event_id,claim.claim_id,'handled','--evidence',review]);
+ assert.equal(read('registry.json').tasks[0].status,'reported');assert.equal(read('inbox.json')[e.event_id].state,'handled');
+ assert.equal(read('registry.json').outbox[e.event_id].targets.telegram.state,'unknown');
+ console.log(JSON.stringify({passed:['real_runner_to_outbox_to_notifier_to_relay_to_review_to_confirmed_report','independent_target_unknown_receipt_preserved'],network_calls:0,model_calls:0}));
+}finally{hooks.session_shutdown?.();delete globalThis[key];fs.rmSync(root,{recursive:true,force:true})}

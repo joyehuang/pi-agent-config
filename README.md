@@ -24,7 +24,7 @@ settings.example.json pi 全局设置模板（packages / extensions / models）
 # 复制模板到实际位置并填入真实值
 cp telegram.example.json ~/.pi/agent/telegram.json   # 填入 bot token
 cp settings.example.json ~/.pi/agent/settings.json
-cp -r extensions/ ~/.pi/agent/extensions/
+# 扩展按需逐个安装；relay-notify 必须使用下文的成套部署器。
 ```
 
 ## Telegram 信息密度
@@ -41,6 +41,8 @@ pi-telegram bridge 的 Activity 投影控制 Telegram 侧展示的 agent traject
 当前使用 `quiet`（`assistant.activity`），Telegram 只显示最终回复。`/settings` 菜单可切换。
 
 ## 部署约定
+
+Telegram delivery / task-watchdog 修复见 [交接说明](docs/delivery-watchdog-fix.md) 和 [审计覆盖](docs/delivery-watchdog-coverage.md)。先运行 `python3 scripts/verify_offline.py`，再用 `python3 scripts/deploy_fix.py` 查看只读部署计划；主 agent 独立验收后才安装、重启和 push。不要单独复制新版 relay-notify，它依赖配套的 bridge 补丁与 task_protocol.py。`patches/notify-agent.py` 只是仓库内兼容入口，不是单文件安装包。
 
 - 改动后立即 `git add -A && git commit && git push`
 - 真实密钥只存 `~/.config/`（0600），不写入本仓库

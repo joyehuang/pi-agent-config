@@ -1,0 +1,43 @@
+{
+  "package": "@llblab/pi-telegram",
+  "version": "0.27.12",
+  "pi_version": "0.84.1",
+  "files": {
+    "lib/activity.ts": {
+      "before": "360bf1fe9c9bf04a9daafe8c30b8ed803fcdd6dcc1eacee1899e2655563c4839",
+      "after": "acaa13d883ca17bf32add3d7c9551e2cbfde068ddcbbb8b21c712ba02edd9c43"
+    },
+    "lib/bindings.ts": {
+      "before": "6a6c5f6385e5bca38675e7216db5c920c33970737eef21e0927448f4483a6bd2",
+      "after": "07a985dd0d3fc6148bd2eb197d459a9feaa3c2d00ed74b3cab531bd26655f6d8"
+    },
+    "lib/outbound.ts": {
+      "before": "598dd313e615b909ab042a886700b002a4b8435dd3ba4437eb986daf7fea19bb",
+      "after": "d67e480ddc0b63eabdd042489b7ca5db4f5c080c6a5869aa1bab06e9772fc25d"
+    },
+    "lib/send-queue.ts": {
+      "before": "3ad6a9aa2048567656cb2c32e4e5c0a4e362ce92510ef9fce04278dfa6f562ee",
+      "after": "6a13451a0ab7a6383b34cb4ae74a79c97c9103045c0b9acd9836c92179b87092"
+    },
+    "lib/queue.ts": {
+      "before": "e066481f30967eb43a0d43054223d65f1487d2652498d0138fd6c51e3b4ebae3",
+      "after": "3423f6fefd1b1baede442355313e076efa73680e92f0e2a35d4d57f235dfbe90"
+    },
+    "index.ts": {
+      "before": "a16118b88e318d27f3491141fd7fcde9417ac48a644be36baae5653de4237fb8",
+      "after": "f561b2ade1bec64605cb1f25a81f4baa6578171f3a15187eddd5ae7660a3aa34"
+    },
+    "lib/bus.ts": {
+      "before": "827ace12bb5516b9a27e94647f971e6703ba20e40d24c63277748ae13ced90fb",
+      "after": "ef60c1ea0cff36a5795640c3536d301b2cd28324166ebae785627a091ef7dcbb"
+    },
+    "lib/bus-follower.ts": {
+      "before": "ff634353311a2cc26028718093d0a793078a50abfb9442214ff05be62f2fdd89",
+      "after": "2418330f863284cade17bbbdba7c2ee6ebf23c4bcc5babc4204166cbcf8ceba6"
+    },
+    "lib/bus-leader.ts": {
+      "before": "96b6d10279b371adaf1185a29d7eca578f641007d0d81926b3fec1bd8306da58",
+      "after": "04021a1a7eb6b5844e133da16db2b1b670d53aff38ab0b137e398363dac13cf9"
+    }
+  }
+}

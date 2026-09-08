@@ -1,0 +1,22 @@
+{
+  "bin/task-watchdog.py": {
+    "source": "scripts/task-watchdog.py",
+    "before": "2a1be486f310840236215f46b0048d873cdfba8f4980d11b4728b43dd34ecaf5"
+  },
+  "bin/notify-agent.py": {
+    "source": "scripts/notify-agent.py",
+    "before": "760d5cedbabffba68ba0ee8e188175aa70d7818b2bd305af98a7398f83b9ffd9"
+  },
+  "bin/notify-telegram.py": {
+    "source": "scripts/notify-telegram.py",
+    "before": "eb83decc809c8e41cb306caf78e9f1fc7f24dd1543519f15878dd5b057c30a3f"
+  },
+  ".pi/agent/extensions/relay-notify.ts": {
+    "source": "extensions/relay-notify.ts",
+    "before": "e9ea5657cd6440cd8e6aac67e2857503a5549a7077fef6d5d03829ace0b3c6ff"
+  },
+  "bin/task_protocol.py": {
+    "source": "scripts/task_protocol.py",
+    "before": null
+  }
+}

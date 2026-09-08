@@ -1,0 +1,92 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -74,18 +74,13 @@
+ 
+ > 2026-08-20 教训：trajectory-panel v2 完成后 workspace 闲置 3 小时，v3 直到用户问起才开始。根因：`--wait` 被 abort 后误判“还在跑”，没轮询状态也没检测完成标记。**多阶段接力必须脚本化自动触发，不能靠 agent 人工盯梢。**
+ 
+-### 方式 A：同 agent 接力（推荐）
++### 方式 A：有证据的阶段接力
+ 
+-```bash
+-# 发完 stage1，立即挂接力循环：检测到 DONE_XXX 就自动发 stage2
+-until herdr agent read <name> --source recent-unwrapped 2>/dev/null | grep -q "DONE_STAGE1"; do sleep 60; done
+-herdr agent prompt <name> "$(cat prompts/stage2.txt)" --wait --timeout 1800000
+-# stage2 同理接 stage3...
+-```
++终端文本可能回显 prompt 中的 DONE 标记，不能用 grep 命中作为成功闸门。阶段由统一 runner 启动并 wait，生成 task_id/run_id 对应的不可变 result。检查退出码、实际 stdout 标记、当前 run 的新产物和 reason/error；有 review 要求时必须验收通过后才接力。
+ 
+-- prompt 里要求每阶段末尾打印唯一完成标记（`DONE_STAGE1` / `DONE_STAGE2`…）
+-- 每阶段之间用 until 循环 grep 该标记，命中才发下一阶段
+-- 适合：同一 workspace/目录的连续改动（如 UI 升级 → 后端接入）
++- 不把 herdr wait 返回、agent_status=done、pane wait-output 命中等同于目标完成。
++- 已授权的后续阶段由主 agent 在核验证据后继续执行；预算边界或 read_error 保留为边界/阻塞。
++- 未接入 runner 的历史 herdr agent 保持 needs_reconciliation，不能补写猜测退出码。
+ 
+ ### 方式 B：多阶段合并成一个连续任务
+ 
+@@ -98,8 +93,8 @@
+ ```bash
+ # 后台跑一个接力脚本，每阶段用 herdr 内置 wait 等完成，跑完才退出
+ cat > /tmp/relay.sh << 'EOF'
+-herdr agent wait <name> --until done --timeout 1800000   # 等任务完成（agent 回 idle/done）
+-herdr agent prompt <name> "$(cat v3.txt)" --wait --timeout 1800000  # 下一阶段（--wait 本身就等到完成）
++herdr agent wait <name> --until done --timeout 1800000   # 只等进程/agent 状态，不证明业务成功
++# 此处按下节协议核对 result 和验收记录；通过后才执行下一阶段 prompt。
+ EOF
+ nohup bash /tmp/relay.sh > /tmp/relay.log 2>&1 &
+ ```
+@@ -114,38 +109,26 @@
+ 
+ - 承诺“我收尾/我盯着”必须伴随实际保障机制（herdr 内置 wait/接力脚本），否则不说
+ - `--wait` 被 abort ≠ 任务没在跑，先查 `herdr agent get <name>` 的 `agent_status` 再判断
+-- 阶段完成标准 = prompt 里要求的 `DONE_XXX` 标记出现，不是时间到了就以为完成
++- 阶段完成标准来自当前 run 的实际输出、退出码、产物与业务结果；prompt 回显和时间经过都不构成完成证据。
+ 
+-## 6. 后台任务协议（任务登记簿 + 验收闸门，2026-09-04 与用户定稿）
++## 6. 后台任务协议（task/run、验收与签收）
+ 
+-后台任务 = subagent 模式：我是 orchestrator，herdr workspace 是 worker subagent，我是质量验收闸门。用户默认只听到「做完了」和需要拍板的事。
++本节仅在主 agent 独立验收并安装 pi-agent-config 的 delivery/watchdog 修复之后启用；不能只同步 skill 就假设运行时已支持。同步运行时与 skills 仓库时保留所有模型默认值。
+ 
+-### 任务分类（接到任务先判断，前台 or 后台）
++- 登记使用 `python3 ~/bin/task_protocol.py register TASK --spec PRIVATE_JSON`，必须有 instruction、acceptance、artifacts、done_marker、type、route。Herdr 另填 agent_name/workspace_id/pane_id，不混用 workspace。
++- 每次执行 `start-run TASK --run-id RUN`，再用 `run TASK RUN -- ABSOLUTE_COMMAND ARGS`。只有 runner wait 的退出码能作进程结果；worker 按 TASK_ID/TASK_RUN_ID/TASK_RESULT_PATH 输出结构化 business JSON，并在实际 stdout 打印独立 marker 行。
++- `result TASK RUN` 查看不可变证据；空/旧产物、缺 marker、非零退出、PID 身份不符、read_error/http_error、预算耗尽都不证明目标成功。batch_finished 与 ready_for_review 分开。
++- 禁止直接整份覆盖 registry。所有 writer 改用协议 CLI；普通元数据使用带 expected-hash 的 update。旧不守锁 writer 必须迁移，不能认为 flock 能保护任何外部写入。
++- 收到稳定 task/run/event 后先对账，再独立按 acceptance 验收；不是复述 worker 或只回复收到。通过用 `verify TASK RUN --evidence FILE`；失败加 --reject，最多两次返工，达到上限升级给用户。
++- 验收后继续已授权步骤。最终发出前用 prepare-report 绑定正文 hash、目标与验收；实际成功签收后用 report 关联 sender/bridge 账本。没有 message_id 或结果 unknown 不能标 reported，不能盲重发。
++- 处理凭据单独通过 ack EVENT CLAIM handled --evidence FILE 写入；enqueued 只表示注入尝试，不能当作 handled/verified。inspect 查看 claim、lease、outbox、超时与待签收。
++- notify-agent 旧 CLI 保留；新任务传 --task-id/--run-id/--event-id/--result-path/--route（或 task/run/phase 派生稳定 event）。同一事件双生产幂等，不同 run 不吞。
++- 用户直达兜底默认保留，明确待验收/已验收的事件角色，agent 与 telegram 分别签收；不擅自改变策略。失败带 backoff 独立重试，unknown 人工对账。
++- done/ready_for_review/blocked/verified/未签收持续巡检，超时只产生稳定提醒并保留 attention_required。主 agent 不能靠“收到”关闭任务。
++- registry/outbox/inbox/不可变结果与凭据均为私有持久证据，不得宣称损坏可丢弃。旧任务只做保守迁移，不批量宣告完成/失败，不重放旧通知。
++- Relay 只在当前 run-pi.sh 主进程确实拥有 Telegram owner/session/thread 且宿主和队列 idle 时注入。无 owner 留 pending；租约处理崩溃恢复；跨进程 ACK 不明按 at-least-once 对账，不承诺 exactly-once。
+ 
+-- **前台**：需要中途与用户交互、或几分钟内能完的问答/小改。
+-- **后台**：能独立完成、有明确验收标准的活（改代码/跑调研/做报告/长任务烧 token）。
+-- 判断不了就默认前台，或一句话向用户确认；用户说「放后台」/「前台做」优先。
+-
+-### 登记簿（每次派后台活必写）
+-
+-- 文件：`~/.config/agent-tasks/registry.json`（JSON 索引，非真相源）。
+-- 字段：id（`dt-YYYYMMDD-序号`）、instruction（用户原话）、workspace、type（herdr/pid）、done_marker（`DONE_XXX`）、**acceptance（验收标准，派活时写好）**、artifacts、status、iterations。
+-- 派活确认消息顺带把验收标准给用户过目（「已派后台：workspace X，验收标准 Y」），不同意当场改。
+-- 登记簿统一覆盖所有后台活（herdr 的、裸 claude -p 跑批的），不另立账。
+-
+-### 状态 = 证据推导，不是记出来的
+-
+-- **JSON status 只是上次对账的缓存**；真相源：`herdr agent list --json` 的 agent_status、pane 输出里的 DONE 标记、worktree git log、产物文件。任何时刻处理某任务先现场对账。
+-- **done ≠ 做好**：done 只表示「看到完成标记」，verified 要按 acceptance 实际检查产物后才算。
+-- 生命周期：dispatched → running → done（标记出现）→ verified（验收通过）→ reported（已汇报用户）；不通过 → rework（发返工 prompt，iterations+1）。
+-- **回炉上限 2 次**（用户定稿）：第二次还坏就升级给用户，附试过什么、卡在哪。
+-
+-### 通知链路（三层保障）
+-
+-1. **推送**：relay 脚本检测到 DONE 标记 → `python3 ~/bin/notify-agent.py "dt-xxx 完成…" "来源"`（写 spool，relay-notify 扩展注入我会话，忙时入队闲时补发）。
+-2. **拉取**：我处理到该任务时查 herdr 实况，不信任 JSON。
+-3. **兜底**：`com.joye.task-watchdog`（launchd，180s）扫 active 任务对账 herdr 状态，跳变即更新登记 + 注入。推送丢了最多晚一个周期。
+-- 损坏可丢弃：registry 全部条目可从证据重建。
++具体命令、报告签收格式及安全部署/回滚见 pi-agent-config 的 docs/delivery-watchdog-fix.md。主 agent 负责独立验收、上线与生产观察。
+ 
+ ## Artifact convention (user's fixed preference)
+ 
