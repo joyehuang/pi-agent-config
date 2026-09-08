@@ -141,7 +141,7 @@ def resolve_legacy(root,tid,action,evidence,expected_hash,run_id=None):
         t=task(reg,tid)
         if digest(t)!=expected_hash: raise ValueError('task changed; inspect again')
         if not is_legacy(t): raise ValueError('not a legacy task')
-        if rid==t.get('run_id'): raise ValueError('adoption must use a new run id')
+        if action=='adopt' and rid==t.get('run_id'): raise ValueError('adoption must use a new run id')
         if action=='adopt' and (not t.get('acceptance') or t.get('iterations',0)>2): raise ValueError('acceptance or rework limit requires a new task')
         mark_legacy(t)
         t['legacy_resolution']={'action':action,'at':time.time(),'inspection':proof,'references':refs,'task_hash':expected_hash}

@@ -112,6 +112,12 @@ class Rework(unittest.TestCase):
   p.reconcile(self.root);self.assertFalse(self.reg()['outbox']);self.assertNotIn('report',t)
   with self.assertRaises(ValueError):p.resolve_legacy(self.root,'t','close',proof,h)
   with self.assertRaises(ValueError):p.start_run(self.root,'t','unexpected')
+ def test_legacy_close_without_run_id(self):
+  self.make_legacy()
+  with p.transaction(self.root) as reg:reg['tasks'][0].pop('run_id')
+  proof,h=self.inspection('close');p.resolve_legacy(self.root,'t','close',proof,h)
+  t=self.reg()['tasks'][0];self.assertEqual(t['status'],'closed_legacy');self.assertNotIn('report',t)
+  p.reconcile(self.root);self.assertFalse(self.reg()['outbox'])
  def test_missing_run_mapping_shapes_and_reference_validation(self):
   self.make_legacy()
   for runs in (None,{}, {'implementation-1':{}}, {'implementation-1':{'started_at':1}}):
