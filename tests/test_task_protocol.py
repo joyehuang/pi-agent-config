@@ -108,6 +108,9 @@ class Protocol(unittest.TestCase):
 class Telegram(unittest.TestCase):
  def test_transport_contract(self):
   spec=importlib.util.spec_from_file_location('notify_tg',Path(p.__file__).with_name('notify-telegram.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+  import types,itertools
+  ticks=itertools.count(1000,100)
+  m.time=types.SimpleNamespace(time=lambda:next(ticks))
   with tempfile.TemporaryDirectory() as d:
    cfg=Path(d)/'cfg';self.assertEqual(m.send('x',cfg)['state'],'failed');cfg.write_text(json.dumps({'profiles':{'personal':{'botToken':'FAKE','allowedUserId':1}}}))
    class R:
@@ -127,6 +130,23 @@ class Telegram(unittest.TestCase):
    def unknown(*a,**k):calls.append(1);raise TimeoutError()
    self.assertEqual(m.durable_send(d,'e','x',cfg,'personal',unknown)['state'],'unknown')
    m.durable_send(d,'e','x',cfg,'personal',unknown);self.assertEqual(len(calls),1)
+
+ def test_cooldown_and_bridge_reply_priority(self):
+  import io,types
+  spec=importlib.util.spec_from_file_location('notify_tg',Path(p.__file__).with_name('notify-telegram.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+  clock=[1000.0];m.time=types.SimpleNamespace(time=lambda:clock[0]);calls=[]
+  with tempfile.TemporaryDirectory() as d:
+   cfg=Path(d)/'cfg';cfg.write_text(json.dumps({'profiles':{'personal':{'botToken':'FAKE','allowedUserId':1}}}))
+   def limited(*a,**k):
+    calls.append(1)
+    raise m.urllib.error.HTTPError('https://invalid.test',429,'limited',{},io.BytesIO(b'{"parameters":{"retry_after":476}}'))
+   r=m.send('x',cfg,opener=limited);self.assertEqual(r['retry_at'],1478)
+   clock[0]=1400;self.assertEqual(m.send('x',cfg,opener=limited)['reason'],'local_cooldown');self.assertEqual(len(calls),1)
+   directory,key=m.cooldown_guard(cfg,'personal','FAKE',1);out=directory/'outbox';out.mkdir()
+   f=out/(key+'-fixture.json');f.write_text(json.dumps({'status':'rate-limited','retryAt':1900000}))
+   clock[0]=1500;self.assertEqual(m.send('x',cfg,opener=limited)['reason'],'local_cooldown');self.assertEqual(len(calls),1)
+   f.write_text(json.dumps({'status':'held-retry-deadline'}))
+   m.send('x',cfg,opener=limited);self.assertEqual(len(calls),2)
 
 class FaultInjection(unittest.TestCase):
  setUp=Protocol.setUp
