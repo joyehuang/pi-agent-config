@@ -38,6 +38,11 @@ class Protocol(unittest.TestCase):
   with self.assertRaises(ValueError):p.commit_result(self.root,'t','r',dict(r,exit_code=2))
   p.start_run(self.root,'t','r2');r2=dict(r,run_id='r2',started_at=self.reg()['tasks'][0]['runs']['r2']['started_at']);p.commit_result(self.root,'t','r2',r2)
   self.assertEqual(len(self.reg()['outbox']),2)
+  deliveries=[]
+  p.drain(self.root,lambda target,event:(deliveries.append((target,event['run_id'])) or {'state':'success'}))
+  self.assertEqual(deliveries,[('agent','r2'),('telegram','r2')])
+  old=self.reg()['outbox'][p.event_id('t','r','ready_for_review')]
+  self.assertTrue(all(d['state']=='superseded' for d in old['targets'].values()))
  def test_probe_merge_cas(self):
   self.setup_run()
   def concurrent():
@@ -87,6 +92,10 @@ class Protocol(unittest.TestCase):
   with self.assertRaises(ValueError):p.report(self.root,'t','r',receipt)
   known['at']=time.time();p.atomic(self.root/'telegram-receipts.json',{'fixture':known})
   p.report(self.root,'t','r',receipt);self.assertEqual(self.reg()['tasks'][0]['status'],'reported')
+  deliveries=[]
+  p.drain(self.root,lambda target,event:(deliveries.append(target) or {'state':'success'}))
+  self.assertEqual(deliveries,[])
+  self.assertTrue(all(d['state']=='superseded' for e in self.reg()['outbox'].values() for d in e['targets'].values()))
  def test_real_runner_success_and_old_artifact(self):
   self.setup_run();code="import os,json,pathlib; pathlib.Path(%r).write_text('new');pathlib.Path(os.environ['TASK_RESULT_PATH']).write_text(json.dumps(dict(task_id=os.environ['TASK_ID'],run_id=os.environ['TASK_RUN_ID'],reason='goal_complete')));print('DONE_FIXTURE')" % str(self.root/'artifact')
   p.run_command(self.root,'t','r',[sys.executable,'-c',code]);self.assertEqual(self.reg()['tasks'][0]['status'],'ready_for_review')

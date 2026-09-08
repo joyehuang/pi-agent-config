@@ -392,7 +392,16 @@ def drain(root, sender, now=None):
             claim_id=uuid.uuid4().hex
             with transaction(root) as reg:
                 d=reg['outbox'][eid]['targets'][target]
-                if d['state'] in ('success','unknown') or d.get('next_at',0)>now: continue
+                if d['state'] in ('success','unknown','superseded'): continue
+                current=next((t for t in reg.get('tasks',[]) if t['id']==event['task_id']),None)
+                obsolete=(current is None or current.get('run_id')!=event['run_id'] or
+                  current.get('status') in ('reported','closed_legacy') or
+                  (event['phase'] in ('done','ready_for_review','review_overdue') and current.get('status') in ('verified','rework')))
+                # Preserve in-flight/unknown delivery uncertainty. Only unsent
+                # stale notices can be superseded; no fabricated success ACK.
+                if obsolete and d['state']!='sending':
+                    d.update(state='superseded',reason='task_progressed',at=now);continue
+                if d.get('next_at',0)>now: continue
                 if d['state']=='sending':
                     if d.get('lease_until',0)>now: continue
                     if target=='telegram': d['state']='unknown';continue
