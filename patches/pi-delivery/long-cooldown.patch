@@ -1,0 +1,86 @@
+--- a/lib/send-queue.ts
++++ b/lib/send-queue.ts
+@@ -5,7 +5,7 @@
+  */
+ import { AsyncLocalStorage } from "node:async_hooks";
+ import { createHash, randomUUID } from "node:crypto";
+-import { appendFileSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
++import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ import { resolveTelegramTempDir } from "./paths.ts";
+ 
+@@ -116,8 +116,19 @@
+       let files: string[] = [];
+       try { files = readdirSync(options.directory).filter((name) => name.startsWith(`${key}-`) && name.endsWith(".json")); }
+       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+-      state = { cooldown: 0, nextSend: 0, files: new Set(files), failures: new Set(files) };
++      // Recover only the cooldown, never authority to replay an old message.
++      const cooldown = files.reduce((until, file) => {
++        const record = JSON.parse(readFileSync(join(options.directory, file), "utf8"));
++        return Number.isFinite(record.retryAt) ? Math.max(until, record.retryAt) : until;
++      }, 0);
++      state = { cooldown, nextSend: 0, files: new Set(files), failures: new Set(files) };
+       states.set(key, state);
++    }
++    try {
++      const notifications = JSON.parse(readFileSync(join(options.directory, "..", "notification-cooldowns.json"), "utf8"));
++      if (Number.isFinite(notifications[key])) state.cooldown = Math.max(state.cooldown, notifications[key] * 1_000);
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+     }
+     return state;
+   };
+@@ -184,6 +195,9 @@
+       };
+       let knownNotCommitted = true;
+       let retrying = false;
++      let rateRejections = 0;
++      let waitingSince: number | undefined;
++      let waitedMs = 0;
+       const persist = (status: string, details: Record<string, unknown> = {}) => {
+         if (!durable) return;
+         mkdirSync(options.directory, { recursive: true, mode: 0o700 });
+@@ -207,6 +221,11 @@
+           active,
+           async attempt() {
+             try {
++              stateFor(key);
++              if (waitingSince !== undefined) {
++                waitedMs += Math.max(0, now() - waitingSince);
++                waitingSince = undefined;
++              }
+               if (!active() || (retrying && options.canRetryTarget && !options.canRetryTarget(body))) {
+                 // Unsent commentary cancelled at settlement is intentionally
+                 // dropped. An already attempted final stays recoverable.
+@@ -217,13 +236,14 @@
+                 } else if (durable) persist("held-stale-authority");
+                 throw new Error("Telegram outbound request cancelled: delivery authority changed");
+               }
+-              if (now() - started >= (options.maxRetryMs ?? 10 * 60_000)) {
+-                persist("held-retry-deadline");
++              if (now() - started - (captured ? waitedMs : 0) >= (options.maxRetryMs ?? 10 * 60_000) || rateRejections >= 10) {
++                persist("held-retry-deadline", { retryAt: state.cooldown });
+                 throw new Error("Telegram rate-limit recovery deadline exceeded; reply retained in outbox");
+               }
+               const readyAt = Math.max(state.cooldown, state.nextSend);
+               if (readyAt > now()) {
+                 if (ephemeral) { resolve(true as T); return; }
++                waitingSince = now();
+                 job.readyAt = readyAt;
+                 jobs.push(job);
+                 return;
+@@ -257,12 +277,14 @@
+                 if (response.status === 429) {
+                   knownNotCommitted = true;
+                   retrying = true;
++                  rateRejections++;
+                   const delay = Math.max(1_000, (response.retryAfterSeconds ?? 1) * 1_000);
+                   state.cooldown = Math.max(state.cooldown, now() + delay);
+                   if (ephemeral) { resolve(true as T); return; }
+                   persist("rate-limited", { retryAt: state.cooldown });
+                   options.record("outbound", "Telegram rate limited; reply retained for retry", { method, retryAfterMs: delay });
+                   job.readyAt = state.cooldown;
++                  waitingSince = now();
+                   jobs.push(job);
+                   return;
+                 }
