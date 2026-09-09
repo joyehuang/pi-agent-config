@@ -7,6 +7,85 @@ from pathlib import Path
 
 ROOT = Path.home() / '.config/agent-tasks'
 HERDR = Path.home() / '.local/bin/herdr'
+START_GRACE = 120
+TERMINAL = ('reported', 'closed_legacy', 'cancelled')
+CONTROL_PHASES = {'done', 'ready_for_review', 'verified', 'rework', 'blocked',
+    'needs_reconciliation', 'batch_finished', 'review_overdue', 'observation_overdue',
+    'blocked_overdue', 'needs_reconciliation_overdue', 'verified_overdue',
+    'rework_overdue', 'batch_finished_overdue', 'user_input_required', 'human_fallback'}
+
+
+def binding(t):
+    return {k: copy.deepcopy(t.get(k)) for k in ('route', 'type', 'agent_name', 'workspace_id', 'pane_id')}
+
+
+def control_event(reg, e):
+    # Identity comes from private CLI metadata / canonical outbox, never body text.
+    canonical = reg.get('outbox', {}).get(e.get('event_id'))
+    if canonical and all(canonical.get(k) == e.get(k) for k in ('task_id', 'run_id', 'route')):
+        return canonical
+    return e if e.get('task_id') and e.get('run_id') else None
+
+
+def freshness(reg, e):
+    c = control_event(reg, e)
+    if c is None: return None, None  # Legacy mail/private handoff retains its contract.
+    t = next((t for t in reg.get('tasks', []) if t['id'] == c['task_id']), None)
+    if t is None: return c, 'registry_missing'  # Uncertainty is held, not superseded.
+    if t.get('run_id') != c['run_id']: return c, 'run_replaced'
+    if t.get('status') in TERMINAL: return c, 'task_terminal'
+    if c.get('binding') is not None and c['binding'] != binding(t): return c, 'binding_changed'
+    if c.get('route', {}) != t.get('route', {}): return c, 'route_changed'
+    phase, status = c.get('phase'), t.get('status')
+    if phase not in CONTROL_PHASES: return c, 'phase_unknown'
+    expected = {'review_overdue': ('done', 'ready_for_review'), 'done': ('done', 'ready_for_review')}
+    if phase == 'observation_overdue':
+        valid = bool(t.get('probe_unknown_since'))
+    elif phase == 'human_fallback':
+        valid = c.get('for_status') == status and bool(t.get('attention_required'))
+    elif phase == 'user_input_required':
+        valid = t.get('user_request', {}).get('event_id') == c['event_id'] and not t.get('user_request', {}).get('resolved')
+    else:
+        valid = status in expected.get(phase, (phase.removesuffix('_overdue'),))
+    if not valid: return c, 'phase_progressed'
+    if c.get('status_since') is not None and phase not in ('user_input_required',) and c['status_since'] != t.get('status_changed_at'):
+        return c, 'phase_reentered'
+    return c, None
+
+
+def dispose_control(reg, e, now):
+    c, reason = freshness(reg, e)
+    if not reason: return False
+    if e.get('state') in ('handled', 'superseded'): return True
+    if reason in ('registry_missing','phase_unknown') and e.get('disposition',{}).get('reason') == reason: return True
+    t = next((t for t in reg.get('tasks', []) if t['id'] == e.get('task_id')), None)
+    disposition = dict(kind='internal', reason=reason, at=now, event_id=e['event_id'],
+        registry_revision=reg.get('revision'), task_hash=digest(t),
+        result_path=(c or {}).get('result_path'), previous_state=e.get('state'))
+    e.setdefault('dispositions', []).append(disposition)
+    e.update(state='needs_attention' if reason in ('registry_missing','phase_unknown') else 'superseded',
+        disposition=disposition, next_at=now+3600)
+    return True
+
+
+@contextlib.contextmanager
+def registry_inbox(root, write_registry=False):
+    # Fixed registry -> inbox lock order. Consumers never write registry state.
+    # A damaged/missing registry holds structured events but cannot break mail.
+    if write_registry:
+        with transaction(root) as reg:
+            with transaction(root,'inbox.json') as box: yield reg,box
+        return
+    root=Path(root);root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    fd=os.open(root/'registry.json.lock',os.O_CREAT|os.O_RDWR,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        try: reg=read(root/'registry.json',{'tasks':[],'outbox':{}})
+        except (OSError,ValueError): reg={'tasks':[],'outbox':{},'registry_unavailable':True}
+        with transaction(root,'inbox.json') as box: yield reg,box
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN);os.close(fd)
+
 
 class LegacyAdoptionRequired(ValueError):
     pass
@@ -107,11 +186,11 @@ def new_run(t,rid):
     runs=t.setdefault('runs',{})
     if rid in runs: raise ValueError('run exists')
     active=current_run(t)
-    if active and active.get('result_path') is None and t['status']=='running':
+    if active and active.get('result_path') is None and t['status'] in ('starting','running'):
         raise ValueError('active run requires reconciliation before replacement')
     runs[rid]={'run_id':rid,'started_at':time.time(),'baseline':[summary(p) for p in t.get('artifacts',[])]}
-    t.update(run_id=rid,status='running',status_changed_at=time.time())
-    for key in ('verification','report','report_intent','attention_required','probe_unknown_since'):
+    t.update(run_id=rid,status='starting',status_changed_at=time.time())
+    for key in ('verification','report','report_intent','attention_required','probe_unknown_since','user_request'):
         t.pop(key,None)
 
 def start_run(root, tid, run_id=None):
@@ -150,16 +229,38 @@ def resolve_legacy(root,tid,action,evidence,expected_hash,run_id=None):
             t.pop('run_id',None);t['status']='registered';new_run(t,rid)
         elif action=='close': t.update(status='closed_legacy',status_changed_at=time.time())
         else: raise ValueError('invalid legacy action')
-    return {'task_id':tid,'status':'running' if action=='adopt' else 'closed_legacy','run_id':rid}
+    return {'task_id':tid,'status':'starting' if action=='adopt' else 'closed_legacy','run_id':rid}
 
 def event_id(tid, rid, phase): return digest([tid, rid, phase])
 
 def emit(reg, t, phase, now=None):
     rid = t.get('run_id', 'legacy'); eid = event_id(t['id'], rid, phase)
-    reg.setdefault('outbox', {}).setdefault(eid, dict(event_id=eid, task_id=t['id'], run_id=rid,
-      phase=phase, result_path=t.get('runs', {}).get(rid, {}).get('result_path'), route=t.get('route', {'profile':'personal'}),
-      created_at=now or time.time(), targets={k: {'state':'pending', 'attempts':0, 'next_at':0} for k in ('agent','telegram')}))
+    stamp = dict(binding=binding(t), status_since=t.get('status_changed_at'))
+    old = reg.setdefault('outbox', {}).get(eid)
+    if old and any(old.get(k) != v for k, v in stamp.items()):
+        eid = event_id(t['id'], rid, phase + ':' + digest(stamp)[:16])
+    visible = phase in ('human_fallback', 'user_input_required')
+    reg['outbox'].setdefault(eid, dict(event_id=eid, task_id=t['id'], run_id=rid,
+      phase=phase, result_path=t.get('runs', {}).get(rid, {}).get('result_path'), route=copy.deepcopy(t.get('route', {'profile':'personal'})),
+      **stamp, created_at=now if now is not None else time.time(),
+      visibility='human' if visible else 'internal',
+      targets={k: {'state':'pending' if k=='agent' or visible else 'internal', 'attempts':0, 'next_at':0,
+        **({'reason':'internal_control'} if k=='telegram' and not visible else {})} for k in ('agent','telegram')}))
     return eid
+
+
+def request_user(root, tid, rid, evidence, text):
+    proof = summary(evidence)
+    if proof.get('size',0)<=0 or not text.strip(): raise ValueError('decision text and evidence required')
+    with transaction(root) as reg:
+        t = task(reg, tid)
+        if t.get('run_id') != rid or t.get('status') in TERMINAL: raise ValueError('not current')
+        if t.get('user_request'): raise ValueError('request already recorded; reconcile before another request')
+        eid = emit(reg,t,'user_input_required')
+        t['user_request'] = dict(event_id=eid, evidence=proof, text=text, resolved=False)
+        reg['outbox'][eid]['human_reason'] = text
+        return eid
+
 
 def result_status(r):
     if r.get('exit_code') is None: return 'needs_reconciliation'
@@ -190,6 +291,7 @@ def commit_result(root, tid, rid, r):
 def run_command(root, tid, rid, command):
     with transaction(root) as reg:
         t = task(reg, tid); run = t['runs'][rid]
+        if t.get('run_id') != rid or t.get('status') not in ('starting','running','needs_reconciliation'): raise ValueError('not active run')
         if run.get('runner_started'): raise ValueError('runner already started')
         run['runner_started'] = time.time(); run['command_hash'] = digest(command)
         snapshot = copy.deepcopy(t)
@@ -208,7 +310,8 @@ def run_command(root, tid, rid, command):
           error=type(error).__name__,stdout_hash=digest(b''),stderr_hash=digest(b'')))
     identity = pid_identity(proc.pid)
     with transaction(root) as reg:
-        task(reg,tid)['runs'][rid]['pid_identity'] = identity
+        t=task(reg,tid);t['runs'][rid]['pid_identity'] = identity
+        if t.get('run_id') == rid: t.update(status='running',status_changed_at=time.time())
     out, err = proc.communicate()
     try: business = read(business_path, {})
     except (ValueError,OSError): business = {'error':'invalid_business_result'}
@@ -228,7 +331,8 @@ def run_command(root, tid, rid, command):
       stdout_hash=digest(out), stderr_hash=digest(err))
     return commit_result(root,tid,rid,r)
 
-def probe(t, root, herdr=HERDR):
+def probe(t, root, herdr=HERDR, now=None):
+    now = time.time() if now is None else now
     rid=t.get('run_id'); run=current_run(t)
     if run is None: return {'observed':'legacy_unproven' if is_legacy(t) else 'not_started'}
     try: r=read(Path(root)/'runs'/t['id']/rid/'result.json')
@@ -242,8 +346,10 @@ def probe(t, root, herdr=HERDR):
     # A runner-owned live child takes precedence over UI status / CLI outages.
     if run.get('runner_started') and expected:
         return {'observed':'running' if live==expected else 'runner_exit_unknown','evidence':'runner_pid_birth'}
-    if run.get('runner_started') and time.time()-run['runner_started']<30:
+    if run.get('runner_started') and now-run['runner_started']<30:
         return {'observed':'runner_starting'}
+    if not run.get('runner_started') and not expected and now-run['started_at'] < START_GRACE:
+        return {'observed':'runner_starting', 'evidence':'start_run_grace'}
     if t.get('type')=='herdr':
         if not all(t.get(k) for k in ('agent_name','workspace_id','pane_id')): return {'observed':'missing_herdr_identity'}
         try:
@@ -271,7 +377,7 @@ def herdr_observation(data,returncode,t):
 
 def reconcile(root, now=None, herdr=HERDR, after_probe=None):
     now=now or time.time(); snapshot=read(Path(root)/'registry.json',{'tasks':[]})
-    observations=[(t,probe(t,root,herdr)) for t in snapshot['tasks'] if t.get('status') not in ('reported','closed_legacy')]
+    observations=[(t,probe(t,root,herdr,now)) for t in snapshot['tasks'] if t.get('status') not in TERMINAL]
     if after_probe: after_probe()
     for old, obs in observations:
         with transaction(root) as reg:
@@ -293,11 +399,11 @@ def reconcile(root, now=None, herdr=HERDR, after_probe=None):
                 t['runs'][rid]['result_path']=str(Path(root)/'runs'/t['id']/rid/'result.json')
                 if status!=t['status']: t.update(status=status,status_changed_at=now)
                 emit(reg,t,status,now)
-            elif obs.get('observed')=='herdr_blocked' and t['status'] in ('running','needs_reconciliation'):
+            elif obs.get('observed')=='herdr_blocked' and t['status'] in ('starting','running','needs_reconciliation'):
                 t.update(status='blocked',status_changed_at=now,block_origin='herdr');emit(reg,t,'blocked',now)
-            elif obs.get('observed')=='running' and (t['status']=='needs_reconciliation' or (t.get('block_origin')=='herdr' and t['status']=='blocked')):
+            elif obs.get('observed')=='running' and (t['status'] in ('starting','needs_reconciliation') or (t.get('block_origin')=='herdr' and t['status']=='blocked')):
                 t.update(status='running',status_changed_at=now);t.pop('block_origin',None)
-            elif t['status']=='running' and obs.get('observed') in ('herdr_done_unverified','herdr_idle_unverified','runner_exit_unknown','pid_missing_or_reused','result_unreadable','result_identity_mismatch'):
+            elif t['status'] in ('starting','running') and obs.get('observed') in ('herdr_done_unverified','herdr_idle_unverified','runner_exit_unknown','pid_missing_or_reused','result_unreadable','result_identity_mismatch'):
                 t.update(status='needs_reconciliation',status_changed_at=now);emit(reg,t,'needs_reconciliation',now)
             uncertain=obs.get('observed') in ('herdr_error','herdr_not_found','herdr_schema_unknown','herdr_identity_mismatch','herdr_unknown','missing_herdr_identity')
             if uncertain:
@@ -313,17 +419,30 @@ def reconcile(root, now=None, herdr=HERDR, after_probe=None):
                 if now-since>=t.get('review_timeout',1800):
                     phase='review_overdue' if t['status'] in ('done','ready_for_review') else t['status']+'_overdue'
                     emit(reg,t,phase,now);t['attention_required']=phase
+            # One explainable fallback per task/run; no transient blocked/receipt alarm.
+            persistent = t.get('attention_required') and now-t.get('probe_unknown_since',t.get('status_changed_at',now)) >= max(1800,t.get('review_timeout',1800))
+            if persistent or t.get('iterations',0)>2:
+                t.setdefault('attention_required','rework_limit')
+                eid=event_id(t['id'],t.get('run_id','legacy'),'human_fallback')
+                if eid not in reg.setdefault('outbox',{}):
+                    eid=emit(reg,t,'human_fallback',now)
+                    reg['outbox'][eid].update(for_status=t['status'],human_reason=t['attention_required'])
 
 # Separate private inbox: old CLI does not depend on a valid task registry.
 def enqueue(root, text, source='', event=None):
     e=dict(event or {});e.setdefault('event_id',uuid.uuid4().hex);e.setdefault('route',{'profile':'personal'})
     e.update(text=text[:500],source=source,ts=time.time())
+    if e.get('phase') is not None and e['phase'] not in CONTROL_PHASES: raise ValueError('unknown control phase')
     eid=e['event_id']
-    with transaction(root,'inbox.json') as box:
+    with registry_inbox(root) as (reg, box):
+        canonical=control_event(reg,e)
+        if canonical:
+            for k in ('phase','binding','status_since','created_at','visibility'):
+                if k in canonical: e[k]=copy.deepcopy(canonical[k])
         if eid in box:
             for k in ('task_id','run_id','result_path','route'):
                 if box[eid].get(k)!=e.get(k): raise ValueError('event collision')
-        else: box[eid]=dict(e,state='pending',attempts=0,next_at=0)
+        else: box[eid]=dict(e,state='pending',attempts=0,next_at=0,admission_order=max((v.get('admission_order',0) for v in box.values()),default=0)+1)
     return eid
 
 def route_matches(want, owner):
@@ -334,17 +453,56 @@ def route_matches(want, owner):
     return target is None or target==owner.get('target')
 
 def claim(root, owner, now=None):
-    now=now or time.time()
-    with transaction(root,'inbox.json') as box:
-        for e in box.values():
-            if not route_matches(e.get('route',{}),owner) or e['state']=='handled': continue
+    now=time.time() if now is None else now
+    with registry_inbox(root) as (reg, box):
+        # Original timestamp then last attempt: retries cannot starve fresh mail.
+        for e in sorted(box.values(), key=lambda e:(max(e.get('last_claim_at',0),e.get('created_at',e.get('ts',0))),e.get('ts',0),e.get('admission_order',0),e['event_id'])):
+            if e['state'] in ('handled','superseded'): continue
+            if dispose_control(reg,e,now): continue
+            if not route_matches(e.get('route',{}),owner): continue
             changed_branch=e['state']=='needs_attention' and any(e.get('attention_owner',{}).get(k)!=owner.get(k) for k in ('session_id','leaf_id'))
             if e.get('next_at',0)>now and not changed_branch: continue
             if e['state'] in ('claimed','enqueued') and e.get('lease_until',0)>now: continue
-            # Redelivery after crash is at least once, with the same event id.
-            e.update(state='claimed',claim_id=uuid.uuid4().hex,owner=owner,lease_until=now+120,attempts=e['attempts']+1)
+            e.update(state='claimed',claim_id=uuid.uuid4().hex,owner=owner,lease_until=now+120,
+                attempts=e['attempts']+1,last_claim_at=now)
             return copy.deepcopy(e)
     return None
+
+
+def validate_notice(root,eid,cid,owner,now=None):
+    now=time.time() if now is None else now
+    with registry_inbox(root) as (reg,box):
+        e=box[eid]
+        if e.get('claim_id')!=cid: return {'action':'stale_claim'}
+        if e['state'] in ('handled','superseded'): return {'action':e['state']}
+        if dispose_control(reg,e,now): return {'action':e['state']}
+        keys=('pid','session_id','profile','target','generation','epoch','leaf_id')
+        if not route_matches(e.get('route',{}),dict(owner,idle=True)) or any(e.get('owner',{}).get(k)!=owner.get(k) for k in keys):
+            return {'action':'owner_changed'}
+        c=control_event(reg,e)
+        return {'action':'current','internal':c is not None,'phase':c.get('phase') if c else None}
+
+
+def migrate_notifications(root, apply=False):
+    # Explicit default read-only migration, preserving original receipts and body.
+    def migrate(reg,box):
+        changed=[]
+        for e in box.values():
+            if e.get('state') not in ('handled','superseded') and dispose_control(reg,e,time.time()): changed.append(e['event_id'])
+        for eid,e in reg.get('outbox',{}).items():
+            c,reason=freshness(reg,e)
+            for target,d in e.get('targets',{}).items():
+                if d.get('state') in ('success','unknown','sending','superseded','internal'): continue
+                if reason and reason not in ('registry_missing','phase_unknown'):
+                    d.update(state='superseded',reason=reason,at=time.time());changed.append(eid+':'+target)
+                elif c and target=='telegram' and c['phase'] not in ('human_fallback','user_input_required'):
+                    d.update(state='internal',reason='internal_control',at=time.time());changed.append(eid+':'+target)
+        return {'changed':changed,'applied':apply}
+    if not apply:
+        return migrate(read(Path(root)/'registry.json',{'tasks':[]}),read(Path(root)/'inbox.json',{}))
+    with registry_inbox(root,write_registry=True) as (reg,box):
+        return migrate(reg,box)
+
 
 def receipt(root,eid,cid,state,evidence=None):
     if state not in ('pending','enqueued','handled'): raise ValueError('bad receipt')
@@ -353,7 +511,7 @@ def receipt(root,eid,cid,state,evidence=None):
     with transaction(root,'inbox.json') as box:
         e=box[eid]
         if e.get('claim_id')!=cid: raise ValueError('stale claim')
-        if e['state']=='handled': return
+        if e['state'] in ('handled','superseded'): return
         e.update(state=state,receipt=proof if state=='handled' else evidence,updated_at=time.time())
         if state=='pending': e['next_at']=time.time()+min(3600,5*2**min(e['attempts'],9))
         if state=='enqueued':
@@ -366,10 +524,11 @@ def observe_input(root,eid,cid,entry_id,session_id,recovery_entry_id=None,entry_
     it cannot renew enqueued forever or automatically repeat business side effects.
     """
     now=now or time.time()
-    with transaction(root,'inbox.json') as box:
+    with registry_inbox(root) as (reg,box):
         e=box[eid]
         if e.get('claim_id')!=cid: raise ValueError('stale claim')
-        if e['state']=='handled': return {'action':'handled'}
+        if e['state'] in ('handled','superseded'): return {'action':e['state']}
+        if dispose_control(reg,e,now): return {'action':e['state']}
         if e.get('owner',{}).get('session_id')!=session_id: raise ValueError('session mismatch')
         e['observed_input']={'entry_id':entry_id,'session_id':session_id,'at':now}
         e.setdefault('first_enqueued_at',min(now,entry_at) if entry_at is not None and entry_at>0 else now)
@@ -387,20 +546,19 @@ def observe_input(root,eid,cid,entry_id,session_id,recovery_entry_id=None,entry_
 def drain(root, sender, now=None):
     now=now or time.time()
     snapshot=read(Path(root)/'registry.json',{'outbox':{}})
-    for eid,event in snapshot.get('outbox',{}).items():
+    for eid,event in sorted(snapshot.get('outbox',{}).items(),key=lambda pair:(pair[1].get('created_at',0),pair[0])):
         for target in ('agent','telegram'):
             claim_id=uuid.uuid4().hex
             with transaction(root) as reg:
                 d=reg['outbox'][eid]['targets'][target]
-                if d['state'] in ('success','unknown','superseded'): continue
-                current=next((t for t in reg.get('tasks',[]) if t['id']==event['task_id']),None)
-                obsolete=(current is None or current.get('run_id')!=event['run_id'] or
-                  current.get('status') in ('reported','closed_legacy') or
-                  (event['phase'] in ('done','ready_for_review','review_overdue') and current.get('status') in ('verified','rework')))
-                # Preserve in-flight/unknown delivery uncertainty. Only unsent
-                # stale notices can be superseded; no fabricated success ACK.
-                if obsolete and d['state']!='sending':
-                    d.update(state='superseded',reason='task_progressed',at=now);continue
+                if d['state'] in ('success','unknown','superseded','internal'): continue
+                _, reason=freshness(reg,event)
+                if reason in ('registry_missing','phase_unknown'): continue
+                # Physical sending/unknown must never be relabelled as unsent.
+                if reason and d['state']!='sending':
+                    d.update(state='superseded',reason=reason,at=now);continue
+                if target=='telegram' and event['phase'] not in ('human_fallback','user_input_required') and d['state']!='sending':
+                    d.update(state='internal',reason='internal_control',at=now);continue
                 if d.get('next_at',0)>now: continue
                 if d['state']=='sending':
                     if d.get('lease_until',0)>now: continue
@@ -509,6 +667,9 @@ def main():
     for name in ('adopt-legacy','close-legacy'):
         s=sub.add_parser(name);s.add_argument('task_id');s.add_argument('--evidence',required=True);s.add_argument('--expected-hash',required=True)
         if name=='adopt-legacy': s.add_argument('--run-id',required=True)
+    s=sub.add_parser('migrate-notifications');s.add_argument('--apply',action='store_true')
+    s=sub.add_parser('request-user');s.add_argument('task_id');s.add_argument('run_id');s.add_argument('--evidence',required=True);s.add_argument('--text-file',required=True)
+    s=sub.add_parser('validate-notice');s.add_argument('event_id');s.add_argument('claim_id');s.add_argument('--owner',required=True)
     s=sub.add_parser('claim');s.add_argument('--owner',required=True)
     s=sub.add_parser('ack');s.add_argument('event_id');s.add_argument('claim_id');s.add_argument('state');s.add_argument('--evidence')
     s=sub.add_parser('observe-input');s.add_argument('event_id');s.add_argument('claim_id');s.add_argument('--entry-id',required=True);s.add_argument('--session-id',required=True);s.add_argument('--recovery-entry-id');s.add_argument('--entry-at',type=float)
@@ -522,6 +683,9 @@ def main():
     elif a.cmd=='run': result=run_command(a.root,a.task_id,a.run_id,a.command[1:] if a.command[:1]==['--'] else a.command)
     elif a.cmd=='result': result=read(a.root/'runs'/ident(a.task_id)/ident(a.run_id)/'result.json')
     elif a.cmd=='reconcile': reconcile(a.root)
+    elif a.cmd=='migrate-notifications': result=migrate_notifications(a.root,a.apply)
+    elif a.cmd=='request-user': result=request_user(a.root,a.task_id,a.run_id,a.evidence,Path(a.text_file).read_text())
+    elif a.cmd=='validate-notice': result=validate_notice(a.root,a.event_id,a.claim_id,json.loads(a.owner))
     elif a.cmd=='claim': result=claim(a.root,json.loads(a.owner))
     elif a.cmd=='ack': receipt(a.root,a.event_id,a.claim_id,a.state,a.evidence)
     elif a.cmd=='observe-input': result=observe_input(a.root,a.event_id,a.claim_id,a.entry_id,a.session_id,a.recovery_entry_id,a.entry_at)

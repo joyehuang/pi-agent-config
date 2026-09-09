@@ -8,6 +8,7 @@ def sender(root,target,event):
     phase=event['phase'];label=('待验收' if phase in ('ready_for_review','done','review_overdue') else
       '已验收，交付待签收' if phase in ('verified','verified_overdue') else '任务状态（未经目标验收）')
     text=f"{label}：{event['task_id']} / {event['run_id']} · {phase}。事件 {event['event_id']}"
+    if event.get('human_reason'): text=f"任务需要关注：{event['task_id']} / {event['run_id']} · {event['human_reason']}"
     if target=='agent':
         cmd=[sys.executable,str(Path(__file__).with_name('notify-agent.py')),text,'task-watchdog','--root',str(root),
           '--task-id',event['task_id'],'--run-id',event['run_id'],'--event-id',event['event_id'],'--route',json.dumps(event['route'])]

@@ -40,25 +40,25 @@ class Protocol(unittest.TestCase):
   self.assertEqual(len(self.reg()['outbox']),2)
   deliveries=[]
   p.drain(self.root,lambda target,event:(deliveries.append((target,event['run_id'])) or {'state':'success'}))
-  self.assertEqual(deliveries,[('agent','r2'),('telegram','r2')])
+  self.assertEqual(deliveries,[('agent','r2')])
   old=self.reg()['outbox'][p.event_id('t','r','ready_for_review')]
-  self.assertTrue(all(d['state']=='superseded' for d in old['targets'].values()))
+  self.assertTrue(all(d['state'] in ('superseded','internal') for d in old['targets'].values()))
  def test_probe_merge_cas(self):
   self.setup_run()
   def concurrent():
    with p.transaction(self.root) as reg:reg['tasks'][0]['new_field']='preserved'
   p.reconcile(self.root,after_probe=concurrent)
-  self.assertEqual(self.reg()['tasks'][0]['new_field'],'preserved');self.assertEqual(self.reg()['tasks'][0]['status'],'running')
+  self.assertEqual(self.reg()['tasks'][0]['new_field'],'preserved');self.assertEqual(self.reg()['tasks'][0]['status'],'starting')
  def test_legacy_no_replay(self):
   p.atomic(self.root/'registry.json',{'tasks':[{'id':'old','status':'done','artifacts':[]},{'id':'reported','status':'reported'}]})
   p.reconcile(self.root);r=self.reg();self.assertEqual(r['tasks'][0]['status'],'needs_reconciliation');self.assertFalse(r.get('outbox'));self.assertEqual(r['tasks'][1]['status'],'reported')
  def test_notify_failure_recovery_unknown(self):
   self.setup_run();p.commit_result(self.root,'t','r',self.result());calls=[]
   def fail(target,event):calls.append(target);return {'state':'failed'}
-  p.drain(self.root,fail,now=100);self.assertEqual(len(calls),2)
-  p.drain(self.root,fail,now=101);self.assertEqual(len(calls),2)
+  p.drain(self.root,fail,now=100);self.assertEqual(len(calls),1)
+  p.drain(self.root,fail,now=101);self.assertEqual(len(calls),1)
   p.drain(self.root,lambda t,e:{'state':'unknown' if t=='telegram' else 'success'},now=200)
-  p.drain(self.root,fail,now=9999);self.assertEqual(len(calls),2)
+  p.drain(self.root,fail,now=9999);self.assertEqual(len(calls),1)
  def test_claim_crash_busy_owner_and_lease(self):
   p.enqueue(self.root,'x',event={'event_id':'e','route':{'profile':'personal','session_id':'main','target':{'chatId':1,'threadId':2}}})
   o=dict(main=True,idle=True,profile='personal',session_id='main',target={'chatId':1,'threadId':2},pid=1)
@@ -72,9 +72,9 @@ class Protocol(unittest.TestCase):
   p.receipt(self.root,'e',c3['claim_id'],'handled',evidence);self.assertIsNone(p.claim(self.root,o,now=time.time()+4000))
  def test_missing_herdr_pid_reuse_done_overdue_blocked_recovery(self):
   self.setup_run()
-  with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p')
+  with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p');r['tasks'][0]['runs']['r']['started_at']-=p.START_GRACE+1
   self.assertEqual(p.probe(self.reg()['tasks'][0],self.root,self.root/'missing')['observed'],'herdr_error')
-  p.reconcile(self.root,herdr=self.root/'missing');self.assertEqual(self.reg()['tasks'][0]['status'],'running');self.assertEqual(self.reg()['tasks'][0]['observation'],'herdr_error')
+  p.reconcile(self.root,herdr=self.root/'missing');self.assertEqual(self.reg()['tasks'][0]['status'],'starting');self.assertEqual(self.reg()['tasks'][0]['observation'],'herdr_error')
   p.commit_result(self.root,'t','r',self.result())
   p.reconcile(self.root,now=time.time()+3600);p.reconcile(self.root,now=time.time()+7200)
   self.assertEqual(sum(e['phase']=='review_overdue' for e in self.reg()['outbox'].values()),1)
@@ -95,7 +95,7 @@ class Protocol(unittest.TestCase):
   deliveries=[]
   p.drain(self.root,lambda target,event:(deliveries.append(target) or {'state':'success'}))
   self.assertEqual(deliveries,[])
-  self.assertTrue(all(d['state']=='superseded' for e in self.reg()['outbox'].values() for d in e['targets'].values()))
+  self.assertTrue(all(d['state'] in ('superseded','internal') for e in self.reg()['outbox'].values() for d in e['targets'].values()))
  def test_real_runner_success_and_old_artifact(self):
   self.setup_run();code="import os,json,pathlib; pathlib.Path(%r).write_text('new');pathlib.Path(os.environ['TASK_RESULT_PATH']).write_text(json.dumps(dict(task_id=os.environ['TASK_ID'],run_id=os.environ['TASK_RUN_ID'],reason='goal_complete')));print('DONE_FIXTURE')" % str(self.root/'artifact')
   p.run_command(self.root,'t','r',[sys.executable,'-c',code]);self.assertEqual(self.reg()['tasks'][0]['status'],'ready_for_review')
@@ -162,7 +162,7 @@ class FaultInjection(unittest.TestCase):
   try:self.assertEqual(p.probe(self.reg()['tasks'][0],self.root)['observed'],'pid_missing_or_reused')
   finally:p.pid_identity=original
   fake=self.root/'herdr';fake.write_text('#!/bin/sh\nprintf \'{"result":{"type":"agent_info","agent":{"agent_status":"done","workspace_id":"w","pane_id":"p","prompt":"DONE_FIXTURE"}}}\\n\'\n');fake.chmod(0o700)
-  with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p')
+  with p.transaction(self.root) as r:r['tasks'][0].update(type='herdr',agent_name='a',workspace_id='w',pane_id='p');r['tasks'][0]['runs']['r']['started_at']-=p.START_GRACE+1
   obs=p.probe(self.reg()['tasks'][0],self.root,fake);self.assertEqual(obs['observed'],'herdr_done_unverified')
   p.reconcile(self.root,herdr=fake);self.assertEqual(self.reg()['tasks'][0]['status'],'needs_reconciliation')
  def test_outbox_crash_lease_and_duplicate_delivery(self):

@@ -21,7 +21,7 @@ let hooks={},sent=[],fail=false,idle=true,main=true;
 const key=Symbol.for('joye.pi-telegram.relay-owner.v1');
 globalThis[key]=()=>({pid:process.pid,profile:'personal',session_id:manager.getSessionId(),target:{chatId:123,threadId:2},generation:'g',epoch:'1',idle});
 const ctx={isIdle:()=>idle,hasPendingMessages:()=>false,get sessionManager(){return manager}};
-const pi={on:(name,cb)=>hooks[name]=cb,exec:async(cmd,args)=>{try{const r=await exec(cmd,args);return {...r,code:0}}catch{return {code:1,stdout:''}}},sendUserMessage:text=>{if(fail)throw Error('injection');sent.push(text);manager.appendMessage({role:'user',content:text,timestamp:Date.now()})}};
+const pi={registerTool:()=>{},appendEntry:()=>{},on:(name,cb)=>hooks[name]=cb,exec:async(cmd,args)=>{try{const r=await exec(cmd,args);return {...r,code:0}}catch{return {code:1,stdout:''}}},sendUserMessage:text=>{if(fail)throw Error('injection');sent.push(text);manager.appendMessage({role:'user',content:text,timestamp:Date.now()})}};
 const start=()=>{hooks={};const r=createRelay(pi,{isMain:()=>main,script,root});hooks.session_start({},ctx);return r};
 const clock=Date.now;
 try{

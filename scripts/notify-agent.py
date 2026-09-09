@@ -10,7 +10,7 @@ def main():
     p.add_argument('--json',action='store_true',help='request JSON receipt for a legacy notification')
     a=p.parse_args()
     if not a.text.strip(): p.error('text required')
-    fields={k:getattr(a,k) for k in ('task_id','run_id','event_id','result_path') if getattr(a,k)}
+    fields={k:getattr(a,k) for k in ('task_id','run_id','event_id','result_path','phase') if getattr(a,k)}
     if a.task_id and a.run_id and not a.event_id:
         if not a.phase: p.error('--phase required with task/run when event-id is omitted')
         fields['event_id']=event_id(a.task_id,a.run_id,a.phase)

@@ -23,10 +23,11 @@ try {
  const drainCode=`import sys,subprocess,json\nsys.path.insert(0,${JSON.stringify(path.resolve('scripts'))})\nfrom task_protocol import drain\ndef send(target,e):\n if target=='telegram': return dict(state='unknown',reason='simulated_unknown_ack')\n p=subprocess.run([sys.executable,${JSON.stringify(notify)},'待验收','fixture','--root',${JSON.stringify(root)},'--event-id',e['event_id'],'--task-id',e['task_id'],'--run-id',e['run_id'],'--result-path',e['result_path'],'--route',json.dumps(e['route'])],capture_output=True,text=True,check=True)\n return json.loads(p.stdout)\ndrain(${JSON.stringify(root)},send)\n`;
  await exec('/usr/bin/python3',['-c',drainCode]);
  const e=Object.values(read('registry.json').outbox)[0];
- assert.equal(e.targets.agent.state,'success');assert.equal(e.targets.telegram.state,'unknown');
+ assert.equal(e.targets.agent.state,'success');assert.equal(e.targets.telegram.state,'internal');
  globalThis[key]=()=>owner;
  const context={isIdle:()=>true,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>owner.session_id,getBranch:()=>[],getLeafId:()=>null}};
- const pi={on:(n,cb)=>hooks[n]=cb,exec:async(cmd,args)=>{const r=await exec(cmd,args);return {...r,code:0}},sendUserMessage:text=>injected.push(text)};
+ globalThis[Symbol.for("joye.pi.task-control.core.v1")]={session:true,agent:true};
+ const pi={registerTool:()=>{},appendEntry:()=>{},on:(n,cb)=>hooks[n]=cb,exec:async(cmd,args)=>{const r=await exec(cmd,args);return {...r,code:0}},sendUserMessage:content=>injected.push(typeof content==="string"?content:content[0].text)};
  const relay=createRelay(pi,{isMain:()=>true,root,script});hooks.session_start({},context);await relay.collect();hooks.session_shutdown();
  assert.equal(injected.length,1);assert.ok(injected[0].includes(e.event_id));assert.ok(injected[0].includes(e.result_path));
  assert.equal(read('inbox.json')[e.event_id].state,'enqueued');
@@ -41,6 +42,6 @@ try {
  await run(['report','chain','r1','--receipt',fixture('receipt.json',receipt)]);
  const claim=read('inbox.json')[e.event_id];await run(['ack',e.event_id,claim.claim_id,'handled','--evidence',review]);
  assert.equal(read('registry.json').tasks[0].status,'reported');assert.equal(read('inbox.json')[e.event_id].state,'handled');
- assert.equal(read('registry.json').outbox[e.event_id].targets.telegram.state,'unknown');
- console.log(JSON.stringify({passed:['real_runner_to_outbox_to_notifier_to_relay_to_review_to_confirmed_report','independent_target_unknown_receipt_preserved'],network_calls:0,model_calls:0}));
-}finally{hooks.session_shutdown?.();delete globalThis[key];fs.rmSync(root,{recursive:true,force:true})}
+ assert.equal(read('registry.json').outbox[e.event_id].targets.telegram.state,'internal');
+ console.log(JSON.stringify({passed:['real_runner_to_outbox_to_notifier_to_relay_to_review_to_confirmed_report','internal_phase_has_no_direct_send'],network_calls:0,model_calls:0}));
+}finally{hooks.session_shutdown?.();delete globalThis[key];delete globalThis[Symbol.for('joye.pi.task-control.core.v1')];fs.rmSync(root,{recursive:true,force:true})}

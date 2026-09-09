@@ -91,6 +91,9 @@ export default function (pi: ExtensionAPI) {
     request.admitted = true;
   });
   pi.on("agent_settled", (event, ctx) => {
+    // Trusted in-process capability, scoped to the consumed user message.
+    // Text markers, mail DATA and queued-but-unconsumed input cannot set it.
+    if ((globalThis as any)[Symbol.for("joye.pi.task-control.v1")]?.internal?.(ctx.sessionManager.getSessionId())) { sync(ctx); return; }
     if ((event as { aborted?: boolean }).aborted) return;
     if (!sync(ctx) || !ctx.isIdle() || ctx.hasPendingMessages() || ctx.signal?.aborted || !request || completed || !empty(terminal)) return;
     if (request.retries >= 1) {

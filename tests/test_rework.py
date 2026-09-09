@@ -13,6 +13,8 @@ class Rework(unittest.TestCase):
  def setup_run(self):
   p.register(self.root,'t','fixture','review',[],type='herdr',agent_name='fixture',workspace_id='w1',pane_id='w1:p1')
   p.start_run(self.root,'t','r')
+  # Herdr regressions exercise an established run after the new launch grace.
+  with p.transaction(self.root) as reg: reg['tasks'][0].update(status='running');reg['tasks'][0]['runs']['r']['started_at']=-1000
  def response(self,status):
   data=copy.deepcopy(SCHEMA['observed_response']);data['result']['agent']['agent_status']=status
   return data
@@ -42,7 +44,7 @@ class Rework(unittest.TestCase):
    self.observe(data,code,now=100);t=self.reg()['tasks'][0]
    self.assertEqual(t['status'],'running');self.assertEqual(t['observation'],observed);self.assertFalse(self.reg()['outbox'])
   self.observe(self.response('unknown'),now=2000);self.observe(self.response('unknown'),now=4000)
-  self.assertEqual([e['phase'] for e in self.reg()['outbox'].values()],['observation_overdue'])
+  self.assertEqual(sorted([e['phase'] for e in self.reg()['outbox'].values()],reverse=True),['observation_overdue','human_fallback'])
  def test_runner_pid_birth_precedes_herdr_and_exit_not_guessed(self):
   self.setup_run();identity={'pid':123,'birth':'test birth'}
   with p.transaction(self.root) as reg:reg['tasks'][0]['runs']['r'].update(runner_started=1,pid_identity=identity)
@@ -100,7 +102,7 @@ class Rework(unittest.TestCase):
   proof,h=self.inspection('adopt')
   with self.assertRaises(ValueError):p.resolve_legacy(self.root,'t','adopt',proof,h,'implementation-1')
   subprocess.run(cli+['adopt-legacy','t','--run-id','r2','--evidence',str(proof),'--expected-hash',h],check=True,capture_output=True)
-  t=self.reg()['tasks'][0];self.assertEqual(t['status'],'running');self.assertEqual(t['run_id'],'r2');self.assertEqual(t['legacy_snapshot'],old)
+  t=self.reg()['tasks'][0];self.assertEqual(t['status'],'starting');self.assertEqual(t['run_id'],'r2');self.assertEqual(t['legacy_snapshot'],old)
   self.assertIsNotNone(p.current_run(t));self.assertNotIn('result_path',t['runs']['r2']);self.assertFalse(self.reg()['outbox'])
   self.assertFalse((self.root/'runs/t/implementation-1/result.json').exists())
  def test_legacy_close_is_explicit_non_success_and_cas_guarded(self):

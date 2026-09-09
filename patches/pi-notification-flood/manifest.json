@@ -1,0 +1,558 @@
+{
+  "version": 1,
+  "pi_version": "0.84.1",
+  "bridge_version": "0.27.12",
+  "files": [
+    {
+      "group": "host",
+      "path": "dist/core/agent-session.js",
+      "before": "dc34f32f4cc4929223780a810b7835cfac667786d75e4598d849c6558344873f",
+      "after": "a1fdb578c2f84f73d15aa6c82eb4df472c0bdd33429c14d8a0eabfa29dce86b6",
+      "edits": [
+        [
+          "    async sendUserMessage(content, options) {",
+          "    async sendUserMessage(content, options) {\n        const taskControl = globalThis[Symbol.for(\"joye.pi.task-control.v1\")]?.take?.(content);"
+        ],
+        [
+          "            source: \"extension\",\n        });",
+          "            source: \"extension\",\n            [Symbol.for(\"joye.pi.task-control.message.v1\")]: taskControl,\n        });"
+        ],
+        [
+          "        const preflightResult = options?.preflightResult;",
+          "        const preflightResult = options?.preflightResult;\n        const taskControl = options?.[Symbol.for(\"joye.pi.task-control.message.v1\")];"
+        ],
+        [
+          "await this._queueFollowUp(expandedText, currentImages);",
+          "await this._queueFollowUp(expandedText, currentImages, taskControl);"
+        ],
+        [
+          "await this._queueSteer(expandedText, currentImages);",
+          "await this._queueSteer(expandedText, currentImages, taskControl);"
+        ],
+        [
+          "            // Inject any pending \"nextTurn\" messages as context alongside the user message",
+          "            if (taskControl) {\n                const retained = this._pendingNextTurnMessages.slice();\n                let restored = false;\n                Object.defineProperty(messages[0], Symbol.for(\"joye.pi.task-control.message.v1\"), { value: {\n                    ...taskControl,\n                    check: () => {\n                        const accepted = taskControl.check();\n                        if (!accepted && !restored) {\n                            restored = true;\n                            this._pendingNextTurnMessages.unshift(...retained);\n                        }\n                        return accepted;\n                    },\n                } });\n            }\n            // Inject any pending \"nextTurn\" messages as context alongside the user message"
+        ],
+        [
+          "    async _queueFollowUp(text, images) {",
+          "    async _queueFollowUp(text, images, taskControl) {"
+        ],
+        [
+          "        this.agent.followUp({\n            role: \"user\",\n            content,\n            timestamp: Date.now(),\n        });",
+          "        const message = { role: \"user\", content, timestamp: Date.now() };\n        if (taskControl) Object.defineProperty(message, Symbol.for(\"joye.pi.task-control.message.v1\"), { value: {\n            ...taskControl,\n            check: () => {\n                const accepted = taskControl.check();\n                if (!accepted) {\n                    const index = this._followUpMessages.indexOf(text);\n                    if (index !== -1) this._followUpMessages.splice(index, 1);\n                    this._emitQueueUpdate();\n                }\n                return accepted;\n            },\n        } });\n        this.agent.followUp(message);"
+        ],
+        [
+          "    async _queueSteer(text, images) {",
+          "    async _queueSteer(text, images, taskControl) {"
+        ],
+        [
+          "        this.agent.steer({\n            role: \"user\",\n            content,\n            timestamp: Date.now(),\n        });",
+          "        const message = { role: \"user\", content, timestamp: Date.now() };\n        if (taskControl) Object.defineProperty(message, Symbol.for(\"joye.pi.task-control.message.v1\"), { value: {\n            ...taskControl,\n            check: () => {\n                const accepted = taskControl.check();\n                if (!accepted) {\n                    const index = this._steeringMessages.indexOf(text);\n                    if (index !== -1) this._steeringMessages.splice(index, 1);\n                    this._emitQueueUpdate();\n                }\n                return accepted;\n            },\n        } });\n        this.agent.steer(message);"
+        ],
+        [
+          "    _handleAgentEvent = async (event) => {",
+          "    _handleAgentEvent = async (event) => {\n        globalThis[Symbol.for(\"joye.pi.task-control.v1\")]?.observe?.(event, this.sessionId);"
+        ],
+        [
+          "    async _runAgentPrompt(messages) {",
+          "    async _runAgentPrompt(messages) {\n        globalThis[Symbol.for(\"joye.pi.task-control.v1\")]?.begin?.(this.sessionId);"
+        ],
+        [
+          "        if (options?.deliverAs === \"nextTurn\") {",
+          "        if (options?.deliverAs !== \"nextTurn\") Object.defineProperty(appMessage, Symbol.for(\"joye.pi.external-input.v1\"), { value: true });\n        if (options?.deliverAs === \"nextTurn\") {"
+        ],
+        [
+          "/**\n * AgentSession - Core abstraction for agent lifecycle and session management.\n *\n * This class is shared between all run modes (interactive, print, rpc).\n * It encapsulates:\n * - Agent state acce",
+          "globalThis[Symbol.for(\"joye.pi.task-control.core.v1\")] = { ...globalThis[Symbol.for(\"joye.pi.task-control.core.v1\")], session: true };\n/**\n * AgentSession - Core abstraction for agent lifecycle and session management.\n *\n * This class is shared between all run modes (interactive, print, rpc).\n * It encapsulates:\n * - Agent state acce"
+        ]
+      ]
+    },
+    {
+      "group": "host",
+      "path": "node_modules/@earendil-works/pi-agent-core/dist/agent.js",
+      "before": "d84351e451b9fef40fe2532c446aca90d26a4be9038b2d77d3d45dd6eab21d41",
+      "after": "99f2b0abe36a89cc7a11571c619e427153b902e2c87d352366013713af2300ed",
+      "edits": [
+        [
+          "    drain() {",
+          "    drain() {\n        // Private capability issued by relay; never infer control from message text.\n        // Drop only the selected guarded items and keep draining so stale heads\n        // cannot strand a normal user message behind them.\n        while (this.messages.length) {\n            const first = this.messages[0];\n            const control = first[Symbol.for(\"joye.pi.task-control.message.v1\")];\n            if (!control || control.check()) break;\n            this.messages = this.messages.slice(1);\n        }"
+        ],
+        [
+          "            const drained = this.messages.slice();",
+          "            const drained = this.messages.filter((message, index) => index === 0 || !message[Symbol.for(\"joye.pi.task-control.message.v1\")] || message[Symbol.for(\"joye.pi.task-control.message.v1\")].check());"
+        ],
+        [
+          "        const messages = this.normalizePromptInput(input, images);",
+          "        const messages = this.normalizePromptInput(input, images);\n        // Atomic local admission point after AgentSession's asynchronous hooks.\n        // On a rejected control prompt, do not start an empty agent lifecycle.\n        if (messages.some(message => message[Symbol.for(\"joye.pi.task-control.message.v1\")] && !message[Symbol.for(\"joye.pi.task-control.message.v1\")].check())) return;"
+        ],
+        [
+          "import { runAgentLoop, runAgentLoopContinue } from \"./agent-loop.js\";\nimport { getDefaultStreamFn } from \"./stream-fn.js\";\nfunction defaultConvertToLlm(messages) {\n    return messages.filter((message)",
+          "globalThis[Symbol.for(\"joye.pi.task-control.core.v1\")] = { ...globalThis[Symbol.for(\"joye.pi.task-control.core.v1\")], agent: true };\nimport { runAgentLoop, runAgentLoopContinue } from \"./agent-loop.js\";\nimport { getDefaultStreamFn } from \"./stream-fn.js\";\nfunction defaultConvertToLlm(messages) {\n    return messages.filter((message)"
+        ]
+      ]
+    },
+    {
+      "group": "host",
+      "path": "node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js",
+      "before": "43cc779ddaf90df41768d3d2d0f7d7ba8b8bce7bedc9dc6062ca8b4de84ae880",
+      "after": "077ea5159d4eead2672486ced38fdf3d8ad1c20b00d8d1fa7b0a51114c930bbc",
+      "edits": [
+        [
+          "    const newMessages = [...prompts];\n    const currentContext = {\n        ...context,\n        messages: [...context.messages, ...prompts],\n    };\n    await emit({ type: \"agent_start\" });\n    await emit({ type: \"turn_start\" });",
+          "    await emit({ type: \"agent_start\" });\n    await emit({ type: \"turn_start\" });\n    if (prompts.some(message => message[Symbol.for(\"joye.pi.task-control.message.v1\")] && !message[Symbol.for(\"joye.pi.task-control.message.v1\")].check())) {\n        await emit({ type: \"agent_end\", messages: [] });\n        return [];\n    }\n    const newMessages = [...prompts];\n    const currentContext = {\n        ...context,\n        messages: [...context.messages, ...prompts],\n    };"
+        ],
+        [
+          "        let hasMoreToolCalls = true;",
+          "        let hasMoreToolCalls = firstTurn;"
+        ],
+        [
+          "            // Process pending messages (inject before next assistant response)",
+          "            // A task may advance in an awaited turn_start hook after dequeue.\n            pendingMessages = pendingMessages.filter(message => !message[Symbol.for(\"joye.pi.task-control.message.v1\")] || message[Symbol.for(\"joye.pi.task-control.message.v1\")].check());\n            if (!hasMoreToolCalls && pendingMessages.length === 0) break;\n            // Process pending messages (inject before next assistant response)"
+        ]
+      ]
+    },
+    {
+      "group": "package",
+      "path": "lib/bindings.ts",
+      "before": "17d2a56990ea81e35c00260f455ee19adc71c4d123108970664679a0abc49f3d",
+      "after": "8995f7b15c8fb663d627df11a0b94f94647bf22ae8588d6e46250df9672774bf",
+      "edits": [
+        [
+          "  const agentEndResetter = Runtime.createTelegramAgentEndResetter({",
+          "  const taskPort = () => (globalThis as any)[Symbol.for(\"joye.pi.task-control.v1\")];\n  const internal = (ctx: Pi.ExtensionContext) => taskPort()?.internal?.(ctx.sessionManager.getSessionId()) === true;\n  const agentEndResetter = Runtime.createTelegramAgentEndResetter({"
+        ],
+        [
+          "    async onToolExecutionStart(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;",
+          "    async onToolExecutionStart(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;\n      if (internal(ctx)) return;"
+        ],
+        [
+          "    onToolExecutionUpdate(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;",
+          "    onToolExecutionUpdate(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;\n      if (internal(ctx)) return;"
+        ],
+        [
+          "    async onToolExecutionEnd(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;",
+          "    async onToolExecutionEnd(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;\n      if (internal(ctx)) return;"
+        ],
+        [
+          "    async onMessageStart(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;",
+          "    async onMessageStart(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;\n      if (internal(ctx)) return;"
+        ],
+        [
+          "    async onMessageUpdate(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;",
+          "    async onMessageUpdate(event, ctx) {\n      if (!isSessionContextActive(ctx)) return;\n      if (internal(ctx)) return;"
+        ],
+        [
+          "      await agentLifecycleHooks.onAgentEnd(event, ctx);",
+          "      // Preserve user finals in mixed runs; control responses never become queue finals.\n      const messages = event.messages.filter(message => !taskPort()?.isInternalMessage?.(message));\n      await agentLifecycleHooks.onAgentEnd({ ...event, messages }, ctx);"
+        ]
+      ]
+    },
+    {
+      "group": "bin",
+      "path": "task_protocol.py",
+      "before": "82cbf849e6b2f60ed2b84b1fca5467949f24c0271de3e2afde1e782feebbf816",
+      "after": "72f5ef90a0a3be0c6d7cffa75b318028f1d7f188a410c51889b720e5465cbd51",
+      "source": "scripts/task_protocol.py"
+    },
+    {
+      "group": "bin",
+      "path": "task-watchdog.py",
+      "before": "c2e422527fb2c0518b264f55f6c20f0b8aa0292a5eb2fa553fc916867aec13fb",
+      "after": "d50bd4daa98a85d18200aa2529f09a207d4a76287075e1ed201bce4e5fe4d859",
+      "source": "scripts/task-watchdog.py"
+    },
+    {
+      "group": "bin",
+      "path": "notify-agent.py",
+      "before": "2f949220703237c4c036d52337425f20e9c57cfa609fa78283ab067536149a48",
+      "after": "0cc7a32790284978c684563488e92d37a884c390fccf20bd6407fcca5b4beda1",
+      "source": "scripts/notify-agent.py"
+    },
+    {
+      "group": "extension",
+      "path": "relay-notify.ts",
+      "before": "2978592dc8f6ca44462c5f07972c0e9b887af542cab2a5b50b3c602113397030",
+      "after": "eb0d6e938b4e20ea7e922e8e18e3b4990156e21a04ea42277e8a728c90038d7c",
+      "source": "extensions/relay-notify.ts"
+    },
+    {
+      "group": "extension",
+      "path": "empty-reply-guard.ts",
+      "before": "118a75cb083abc3715bbe7915ab55c6ddcaaf05cd4ff783fbc1778f974034419",
+      "after": "5ea4dbfe506f97e1a0b5471bb6ad3cf7e19b7c477b989fac061d314904dc0854",
+      "source": "extensions/empty-reply-guard.ts"
+    }
+  ],
+  "guards": [
+    {
+      "group": "package",
+      "path": "index.ts",
+      "sha256": "f561b2ade1bec64605cb1f25a81f4baa6578171f3a15187eddd5ae7660a3aa34"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu-thinking.ts",
+      "sha256": "3aca9b29ab156942a1317a923c5d1fba6eb43fef1acb8b213de02cfa9cfc5b3c"
+    },
+    {
+      "group": "package",
+      "path": "lib/keyboard.ts",
+      "sha256": "b710f445db7812e2b61ac59d2e94f8edf0e48f1016800e748bd1672f657ccadc"
+    },
+    {
+      "group": "package",
+      "path": "lib/status.ts",
+      "sha256": "d03c885812237e28b1f97beb393cb115f4f8c51b3882da9277045e468ebccd22"
+    },
+    {
+      "group": "package",
+      "path": "lib/send-queue.ts",
+      "sha256": "593592b904f27f4f195dd6f06719ba26b7e68fe79586c30403499f07550042dc"
+    },
+    {
+      "group": "package",
+      "path": "lib/thread-reconciler.ts",
+      "sha256": "10c8839d2b3f534c5a7510ef90d9a413783bffbccb6f8d90604b3d7483190dcf"
+    },
+    {
+      "group": "package",
+      "path": "lib/commands.ts",
+      "sha256": "98a2ebcdbdc8fe48b93c0e65f8d48eb2958edf5ef538c3350bf092bb92f66576"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu-status.ts",
+      "sha256": "730096be3ae4228edafb70d0f141e038e63bc92772c5bd6e72a938d12ac7df5b"
+    },
+    {
+      "group": "package",
+      "path": "lib/polling.ts",
+      "sha256": "d0ad3e741013bf35e89fd05b6ebe02cae507c51d77ac634ced6b3a21bb295040"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu-settings.ts",
+      "sha256": "02d59333d600079fe0099f269f8a1c86fe1fb8b4577d640cefe06814de728ee7"
+    },
+    {
+      "group": "package",
+      "path": "lib/outbound-attachments.ts",
+      "sha256": "9a4770c035c1995d4463f8b6ff0edc2e504a22a200033507046c02fc64ed8511"
+    },
+    {
+      "group": "package",
+      "path": "lib/target.ts",
+      "sha256": "84f149b46614dd1f30e2f49e84eb523769410fc98cfc187692c544f3135f6204"
+    },
+    {
+      "group": "package",
+      "path": "lib/routing.ts",
+      "sha256": "9b3fd1a3b55b44602e94e45368e9ae13f7518ea135cdc4b7f9f8b955d0ba06e9"
+    },
+    {
+      "group": "package",
+      "path": "lib/telegram-api.ts",
+      "sha256": "49c72f559141bb2989c2619c429ef165f28f3752f4a230391daeb401fe6c6e9f"
+    },
+    {
+      "group": "package",
+      "path": "lib/lifecycle.ts",
+      "sha256": "63749ebd4ae5d583d846bcff9594c0169c96b9089d3cdf8069274134276a91a7"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu-queue.ts",
+      "sha256": "d24e4e77672812c04722031396831d3b036dcc5afa8d034afbc28c86e6e7f544"
+    },
+    {
+      "group": "package",
+      "path": "lib/outbound-buttons.ts",
+      "sha256": "d99a3cba40827d06e8462137cf49260884bc3d0494b9f0b87cc438c5b44dd8b3"
+    },
+    {
+      "group": "package",
+      "path": "lib/logs.ts",
+      "sha256": "8e2cd18eb362ff0dd34ad407a3207e1515502abfc5fc0c39ac9bcf7ac916ed4f"
+    },
+    {
+      "group": "package",
+      "path": "lib/prompt-templates.ts",
+      "sha256": "a9d8da6a9f1aee3bcb12db82b47b102c66e6fcd7782149bb90ca6cd532b258aa"
+    },
+    {
+      "group": "package",
+      "path": "lib/turns.ts",
+      "sha256": "f9a5b4dae45a13c6367ec4ab489cbd5ccb224c7a444a99c39c58f333cf2be3bc"
+    },
+    {
+      "group": "package",
+      "path": "lib/setup.ts",
+      "sha256": "21144a14223dc8e447fb2f11ff62b4b6dc4fc47fd528c4016843ed81ad7cca32"
+    },
+    {
+      "group": "package",
+      "path": "lib/outbound.ts",
+      "sha256": "d67e480ddc0b63eabdd042489b7ca5db4f5c080c6a5869aa1bab06e9772fc25d"
+    },
+    {
+      "group": "package",
+      "path": "lib/threads.ts",
+      "sha256": "a7db1c3e8cda0dffd6e3805161a5623f409159ef0996c97cf174bc8f6f01da33"
+    },
+    {
+      "group": "package",
+      "path": "lib/bus.ts",
+      "sha256": "ef60c1ea0cff36a5795640c3536d301b2cd28324166ebae785627a091ef7dcbb"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu.ts",
+      "sha256": "078a91f9c5845616002c0e9a56c562d8226e7471e5f2dd8e6736aa8d6a607162"
+    },
+    {
+      "group": "package",
+      "path": "lib/voice.ts",
+      "sha256": "231c1c18d6fbfd77fe1968c5d1c60ad99f8c0b9d42789ca4c7b467e4a71e3182"
+    },
+    {
+      "group": "package",
+      "path": "lib/bus-leader.ts",
+      "sha256": "04021a1a7eb6b5844e133da16db2b1b670d53aff38ab0b137e398363dac13cf9"
+    },
+    {
+      "group": "package",
+      "path": "lib/inbound.ts",
+      "sha256": "a4e9d229596b79ce5a1c40f45283136aeae07f8d79be9f6c81cc066b9a2eb268"
+    },
+    {
+      "group": "package",
+      "path": "lib/command-templates.ts",
+      "sha256": "bd0a8a3acc0a889117f87c1ad9423cc46ba96fd3ea7d8e728c0f706ed7a87b42"
+    },
+    {
+      "group": "package",
+      "path": "lib/model.ts",
+      "sha256": "9b782a5ef39914adcf56d0416e8419e58fc163cbdbc187416b4ea9be75710128"
+    },
+    {
+      "group": "package",
+      "path": "lib/bus-api.ts",
+      "sha256": "943c4b7d58fbbcafe57bfd1007400a1147b0e02b95b733f95ddffe048ff039f8"
+    },
+    {
+      "group": "package",
+      "path": "lib/bus-follower.ts",
+      "sha256": "2418330f863284cade17bbbdba7c2ee6ebf23c4bcc5babc4204166cbcf8ceba6"
+    },
+    {
+      "group": "package",
+      "path": "lib/bus-transport.ts",
+      "sha256": "67a2cf97a1567d11b658cc008196a770345aee2984d8859ba99101f0ec609b58"
+    },
+    {
+      "group": "package",
+      "path": "lib/prompts.ts",
+      "sha256": "7825439b1ed33fc025b71411564b16a8436ea7ab81a7b702bbca370f5c7ab709"
+    },
+    {
+      "group": "package",
+      "path": "lib/runtime.ts",
+      "sha256": "6256e74bb1038a941c114888b8db18e84b9e6773084ff5126e8f813a49e66992"
+    },
+    {
+      "group": "package",
+      "path": "lib/pi.ts",
+      "sha256": "ef7577e92201e9e9f9c8632338c2b04d6022dd1d03aadf08fdf0555ba7a374b7"
+    },
+    {
+      "group": "package",
+      "path": "lib/activity-verbosity.ts",
+      "sha256": "834c2535f08f44b353dbcce70e4f15400a6e9e86228ad04de4b232ef36a7abf8"
+    },
+    {
+      "group": "package",
+      "path": "lib/locks.ts",
+      "sha256": "4186c897bc0e54018e366a83957ef5f4a4049a1ae9081a78838c0faefb382c1d"
+    },
+    {
+      "group": "package",
+      "path": "lib/activity.ts",
+      "sha256": "acaa13d883ca17bf32add3d7c9551e2cbfde068ddcbbb8b21c712ba02edd9c43"
+    },
+    {
+      "group": "package",
+      "path": "lib/updates.ts",
+      "sha256": "2e076e87dac09719b0edf69237d0b55664c7182f1b90851453bec9cf8f2c8233"
+    },
+    {
+      "group": "package",
+      "path": "lib/outbound-voice.ts",
+      "sha256": "eff820ebf921bf479e0aff33bd29f21e9e3df6b892ec4bb9536ccb009af22970"
+    },
+    {
+      "group": "package",
+      "path": "lib/rendering.ts",
+      "sha256": "64b2d9d5af6925ddfaddd764bca66dcc4cdced43039ad568b726f5a4240403e5"
+    },
+    {
+      "group": "package",
+      "path": "lib/paths.ts",
+      "sha256": "7233d5c397fc40f9a5e6cdcab599e1d5983504ea1ed9a31f2b75b4f03edcdac2"
+    },
+    {
+      "group": "package",
+      "path": "lib/sections.ts",
+      "sha256": "926c922585fc1d8d4028e147bcdea951b231f4ee8df245cd23fcd7e8ba1d0271"
+    },
+    {
+      "group": "package",
+      "path": "lib/config.ts",
+      "sha256": "54b4b68e99317ca8e4c4d29f3e0755c6d09f109e20d555f8431c3ba4516cddee"
+    },
+    {
+      "group": "package",
+      "path": "lib/recovery.ts",
+      "sha256": "b5c81777d59610c8972c98a0979b3abe6a87fa89a0c4086f87c3acc630b36f9f"
+    },
+    {
+      "group": "package",
+      "path": "lib/menu-model.ts",
+      "sha256": "221bd8ef01e494cf70cadf2ae9495c35db90cf1b773299a9797c2881a9e3f089"
+    },
+    {
+      "group": "package",
+      "path": "lib/media.ts",
+      "sha256": "7b82631368cf851792fde4034d99d245ffa356d324fa9ee34f909029b98bb4db"
+    },
+    {
+      "group": "package",
+      "path": "lib/text-groups.ts",
+      "sha256": "45a97dd793f0427e8bfcd119ecd68fc93acd5b975e610de9a9f040ab34bfc629"
+    },
+    {
+      "group": "package",
+      "path": "lib/delivery.ts",
+      "sha256": "d4db4417b0a92686de16378275745f09aff2a556d8bddb48488ebd8a2b3e6c38"
+    },
+    {
+      "group": "package",
+      "path": "lib/replies.ts",
+      "sha256": "211ceefe642300b748e034ddb8e13df17f45837692c58fb81fd3eb5b33687798"
+    },
+    {
+      "group": "package",
+      "path": "lib/outbound-markup.ts",
+      "sha256": "78bf5c66d3f03e652aec7ec618b9ef8c742f18dae76a19a13f0689123b816e79"
+    },
+    {
+      "group": "package",
+      "path": "lib/ownership.ts",
+      "sha256": "ffdb5051b1acce47f8b1513628bec53d3810afdc6681604d2937ff2bf330b4c4"
+    },
+    {
+      "group": "package",
+      "path": "lib/time-injection.ts",
+      "sha256": "42397d66a3b74e27385ed65713144f266dba78d957eac6e5f5c64d718a6df894"
+    },
+    {
+      "group": "package",
+      "path": "lib/preview.ts",
+      "sha256": "157cb8c3b7bc971acc220df6f827198225af9ec70d470207e919f7faa2e2196e"
+    },
+    {
+      "group": "package",
+      "path": "lib/queue.ts",
+      "sha256": "3423f6fefd1b1baede442355313e076efa73680e92f0e2a35d4d57f235dfbe90"
+    },
+    {
+      "group": "package",
+      "path": "lib/sync.ts",
+      "sha256": "86af81d85c151159a9b2325426d48f436a659a881a47df53be67115e5041783f"
+    },
+    {
+      "group": "package",
+      "path": "lib/agent-messages.ts",
+      "sha256": "7277b5dd2a46341781c3f7e1dbd7b5f80edf28c5d2087116482ffc6d19924e90"
+    },
+    {
+      "group": "package",
+      "path": "api/keyboard.ts",
+      "sha256": "8ac790b599b89ecda25e432411632968e956f80eca73b6ba172c15ce46c39239"
+    },
+    {
+      "group": "package",
+      "path": "api/status.ts",
+      "sha256": "9950d0aa267b83b53eb15a54fc4141695cf7a18966977a14c041426faba5dc5e"
+    },
+    {
+      "group": "package",
+      "path": "api/commands.ts",
+      "sha256": "7c051e9b12ca9cd230c31702304fc9b20dd94cee9f0785cc6dfe0492771a0430"
+    },
+    {
+      "group": "package",
+      "path": "api/outbound.ts",
+      "sha256": "b08108964c45f9c55810e8964e5f79fd055e4805979a0f2feecf3020615eb13f"
+    },
+    {
+      "group": "package",
+      "path": "api/voice.ts",
+      "sha256": "cac65a223fd9785f37f508e5ba868894d69b0b6fda763ab15fa0c541e348070d"
+    },
+    {
+      "group": "package",
+      "path": "api/inbound.ts",
+      "sha256": "98fdc74ad00a53f36f991a67fb927108debb7a0b72a910b0ce5660e1f720df33"
+    },
+    {
+      "group": "package",
+      "path": "api/activity.ts",
+      "sha256": "79660e98a61644c9c1b73cffa998bee2ed45dd246f1c17fd4f84b689b1bb35a1"
+    },
+    {
+      "group": "package",
+      "path": "api/updates.ts",
+      "sha256": "3de5e9cc38353628d10787b3a71f8758bf98a72f8883ea2b7775194f500141cc"
+    },
+    {
+      "group": "package",
+      "path": "api/sections.ts",
+      "sha256": "2797d35fa6e780739332752e1298a32a7f038139fd9c7923760faa01eb7ad3d2"
+    },
+    {
+      "group": "package",
+      "path": "api/delivery.ts",
+      "sha256": "c66b64f1fa98d03c594f61202afdb064fcb81b9fb6f9984c073bdde067d0dccd"
+    },
+    {
+      "group": "host",
+      "path": "dist/core/session-manager.js",
+      "sha256": "330d2981053679418571efe6ca3a4b02cf3e5af2e94efd40476d3535f74094ac"
+    },
+    {
+      "group": "host",
+      "path": "dist/core/agent-session.d.ts",
+      "sha256": "6bcb4ea953a55c4d353a218ae18c657ed1c9b0a4e313b49ea2ee5db72b2376c2"
+    },
+    {
+      "group": "host",
+      "path": "dist/core/extensions/types.d.ts",
+      "sha256": "fa60448ff6259bb94afb6e92e62cb63ca9a1b8bdcc24657f43fed07a4606f2ff"
+    },
+    {
+      "group": "host",
+      "path": "dist/core/extensions/runner.js",
+      "sha256": "b39d59b8f86693b9aca15f13e14f367fce9a0ad8ed7ce9ad17950906f226951d"
+    },
+    {
+      "group": "host",
+      "path": "node_modules/@earendil-works/pi-agent-core/package.json",
+      "sha256": "457a24a34000da4837274246688c0b64b32f6600830010d14be2b2e6fcfc258e"
+    },
+    {
+      "group": "bin",
+      "path": "notify-telegram.py",
+      "sha256": "a7feb443082edaef8d5b253efbf5f8b93b093684b39fb9021524e5330d3408a6"
+    }
+  ]
+}
