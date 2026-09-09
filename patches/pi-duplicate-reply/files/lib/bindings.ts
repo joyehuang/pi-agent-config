@@ -1,0 +1,796 @@
+/**
+ * Telegram bridge binding composition
+ * Zones: telegram, pi agent, orchestration
+ * Owns pi-facing tool, command, and lifecycle hook registration for the entrypoint
+ */
+
+import { createHash } from "node:crypto";
+import * as Activity from "./activity.ts";
+import type { TelegramActivityVerbosityRuntime } from "./activity-verbosity.ts";
+import * as CommandTemplates from "./command-templates.ts";
+import * as Commands from "./commands.ts";
+import * as Config from "./config.ts";
+import * as Keyboard from "./keyboard.ts";
+import * as Lifecycle from "./lifecycle.ts";
+import * as Locks from "./locks.ts";
+import * as Model from "./model.ts";
+import * as OutboundAttachments from "./outbound-attachments.ts";
+import * as OutboundHandlers from "./outbound.ts";
+import * as Pi from "./pi.ts";
+import * as Preview from "./preview.ts";
+import * as Prompts from "./prompts.ts";
+import * as Queue from "./queue.ts";
+import * as Replies from "./replies.ts";
+import * as Routing from "./routing.ts";
+import * as Runtime from "./runtime.ts";
+import * as Setup from "./setup.ts";
+import * as Status from "./status.ts";
+import { withTelegramSendContext } from "./send-queue.ts";
+import * as TelegramApi from "./telegram-api.ts";
+
+export function bindTelegramRelayOwner(pi: Pi.ExtensionAPI, ports: {
+  owns: () => boolean;
+  getTarget: () => {chatId: number; threadId?: number} | undefined;
+  getProfile: () => string | undefined;
+  getEpoch: () => string | number | undefined;
+  generation: string;
+  hasWork: () => boolean;
+}) {
+  const key = Symbol.for("joye.pi-telegram.relay-owner.v1");
+  let context: Pi.ExtensionContext | undefined;
+  const port = () => {
+    const ctx = context;
+    if (!ctx || ctx.mode !== "tui" || !ports.owns()) return undefined;
+    const target = ports.getTarget();
+    if (!target) return undefined;
+    return { pid: process.pid, profile: ports.getProfile() ?? "default",
+      session_id: ctx.sessionManager.getSessionId(), target,
+      generation: ports.generation, epoch: ports.getEpoch(),
+      idle: ctx.isIdle() && !ctx.hasPendingMessages() && !ports.hasWork() };
+  };
+  pi.on("session_start", (_event, ctx) => {
+    context = ctx;
+    (globalThis as any)[key] = port;
+  });
+  pi.on("session_shutdown", () => {
+    context = undefined;
+    if ((globalThis as any)[key] === port) delete (globalThis as any)[key];
+  });
+}
+
+type ActivePiModel = NonNullable<Pi.ExtensionContext["model"]>;
+
+type TelegramRuntimeEventRecorder = (
+  category: string,
+  error: unknown,
+  details?: Record<string, unknown>,
+) => void;
+
+type TelegramBridgeStatusUpdater =
+  Status.TelegramStatusRuntime<Pi.ExtensionContext>["updateStatus"];
+
+export interface TelegramAssistantOutputBindingRuntime<TTransportStamp> {
+  runtime: Activity.TelegramAssistantOutputRuntime;
+  observeEvent: (event: Activity.TelegramActivityEvent) => void;
+  authority: Routing.TelegramAssistantOutputAuthorityRuntime<TTransportStamp>;
+}
+
+export function createTelegramAssistantOutputBindingRuntime<
+  TTransportStamp,
+>(deps: {
+  isEnabled: () => boolean;
+  authority: {
+    getPreferredTarget: () =>
+      | OutboundAttachments.TelegramQueuedOutboundAttachmentTurnView["target"]
+      | undefined;
+    getFallbackChatId: () => number | undefined;
+    getTransportStamp: () => TTransportStamp;
+    isTransportStampActive: (stamp: TTransportStamp) => boolean;
+    ownsDirect: () => boolean;
+    getDirectEpoch: () => number | string | undefined;
+    isFollowerRegistered: () => boolean;
+    getFollowerGeneration: () => string | undefined;
+  };
+  sender: Parameters<
+    typeof OutboundHandlers.createTelegramAssistantOutputSender<TTransportStamp>
+  >[0];
+  waitForActivityIdle?: () => Promise<void>;
+  recordRuntimeEvent: TelegramRuntimeEventRecorder;
+}): TelegramAssistantOutputBindingRuntime<TTransportStamp> {
+  const authority = Routing.createTelegramAssistantOutputAuthorityRuntime(
+    deps.authority,
+  );
+  const sendOutput =
+    OutboundHandlers.createTelegramAssistantOutputSender<TTransportStamp>(
+      deps.sender,
+    );
+  const runtime = Activity.createTelegramAssistantOutputRuntime({
+    isEnabled: deps.isEnabled,
+    ...authority,
+    async send(event, authority, isAuthorityActive) {
+      await deps.waitForActivityIdle?.();
+      if (!isAuthorityActive()) return;
+      await withTelegramSendContext({ priority: "background", isActive: isAuthorityActive, activityId: event.activityId, requestId: event.activityId, route: "assistant-output", source: event.source, placement: event.placement, replyIntent: createHash("sha256").update(event.text).digest("hex"), target: authority.target },
+        () => sendOutput(event, authority, isAuthorityActive));
+    },
+    recordFailure(event, error) {
+      deps.recordRuntimeEvent("proactive-push", error, {
+        activityId: event.activityId,
+        sequence: event.sequence,
+        placement: event.placement,
+      });
+    },
+  });
+  return {
+    runtime,
+    authority,
+    observeEvent(event) {
+      if (event.type === "assistant-segment") runtime.accept(event);
+    },
+  };
+}
+
+interface TelegramCommandsAndToolsBindingDeps {
+  pi: Pi.ExtensionAPI;
+  configStore: Config.TelegramConfigStore;
+  persistConfig: (config?: Config.TelegramConfig) => Promise<void>;
+  setup: Setup.TelegramSetupGuard;
+  activeTurnRuntime: Queue.TelegramActiveTurnStore<Queue.PendingTelegramTurn>;
+  lockedPollingRuntime: Locks.TelegramLockedPollingRuntime<Pi.ExtensionContext>;
+  stopPolling?: () => Promise<void | string>;
+  recoverPollingStart?: Commands.TelegramBridgeCommandRegistrationDeps["recoverPollingStart"];
+  getDisconnectThreadName?: () => string | undefined;
+  onTransportChanged?: () => Promise<void> | void;
+  getStatusLines: (
+    options?: Status.TelegramBridgeStatusLineOptions,
+  ) => string[];
+  buttonActionStore: OutboundHandlers.TelegramButtonActionStore;
+  sendMarkdownReply: (
+    chatId: number,
+    replyToMessageId: number | undefined,
+    markdown: string,
+    options?: { replyMarkup?: unknown },
+  ) => Promise<number | undefined>;
+  callMultipart: OutboundHandlers.TelegramVoiceReplySenderDeps["sendMultipart"];
+  getDefaultChatId: () => number | undefined;
+  getDefaultTarget?: () => OutboundAttachments.TelegramQueuedOutboundAttachmentTurnView["target"];
+  resolveAgentTarget?: OutboundAttachments.TelegramOutboundMessageToolRegistrationDeps["resolveAgentTarget"];
+  routeAgentMessage?: OutboundAttachments.TelegramOutboundMessageToolRegistrationDeps["routeAgentMessage"];
+  canSendDirect: () => boolean;
+  updateStatus: TelegramBridgeStatusUpdater;
+  recordRuntimeEvent: TelegramRuntimeEventRecorder;
+}
+
+export function registerTelegramCommandsAndTools({
+  pi,
+  configStore,
+  persistConfig,
+  setup,
+  activeTurnRuntime,
+  lockedPollingRuntime,
+  stopPolling,
+  recoverPollingStart,
+  getDisconnectThreadName,
+  onTransportChanged,
+  getStatusLines,
+  buttonActionStore,
+  sendMarkdownReply,
+  callMultipart,
+  getDefaultChatId,
+  getDefaultTarget,
+  resolveAgentTarget,
+  routeAgentMessage,
+  canSendDirect,
+  recordRuntimeEvent,
+  updateStatus,
+}: TelegramCommandsAndToolsBindingDeps): void {
+  OutboundAttachments.registerTelegramOutboundAttachmentTool(pi, {
+    getActiveTurn: activeTurnRuntime.get,
+    getDefaultChatId,
+    getDefaultTarget,
+    canSendDirect,
+    sendMultipart: callMultipart,
+    recordRuntimeEvent,
+  });
+  OutboundAttachments.registerTelegramOutboundMessageTool(pi, {
+    getDefaultChatId,
+    getDefaultTarget,
+    getActiveTurn: activeTurnRuntime.get,
+    resolveAgentTarget,
+    routeAgentMessage,
+    canSendDirect,
+    planMessage:
+      OutboundHandlers.createTelegramOutboundReplyPlanner(buttonActionStore),
+    sendMarkdownMessage: (chatId, markdown, options) =>
+      sendMarkdownReply(chatId, undefined, markdown, options),
+    recordRuntimeEvent,
+  });
+  Prompts.registerTelegramHelpTool(pi, {
+    getActiveProfileName: configStore.getActiveProfileName,
+  });
+  Commands.registerTelegramBridgeCommands(pi, {
+    promptForConfig: async (ctx, profileName) => {
+      const nextProfileName = profileName ?? undefined;
+      if (profileName && !Config.isValidTelegramProfileName(profileName)) {
+        ctx.ui.notify(`Invalid Telegram profile name: ${profileName}`, "error");
+        return;
+      }
+      const previousProfileName = configStore.getActiveProfileName();
+      let setupConfigStore = configStore;
+      let persistSetupConfig = persistConfig;
+      if (!profileName) {
+        if (previousProfileName !== nextProfileName) {
+          await (stopPolling ?? lockedPollingRuntime.stop)();
+        }
+        configStore.activateProfile(undefined);
+        await onTransportChanged?.();
+      } else {
+        const storedConfig = configStore.getStoredConfig();
+        setupConfigStore = Config.createTelegramConfigStore({
+          initialConfig: {
+            ...storedConfig,
+            profiles: {
+              ...(storedConfig.profiles ?? {}),
+              [profileName]: storedConfig.profiles?.[profileName] ?? {
+                botToken: "",
+              },
+            },
+          },
+        });
+        setupConfigStore.activateProfile(profileName);
+        persistSetupConfig = async () => {
+          try {
+            if (previousProfileName !== profileName) {
+              await (stopPolling ?? lockedPollingRuntime.stop)();
+            }
+            const profile = Config.getTelegramProfileFields(
+              setupConfigStore.get(),
+            );
+            if (!profile) {
+              throw new Error(
+                `Telegram profile "${profileName}" has no token.`,
+              );
+            }
+            await configStore.load();
+            configStore.setProfile(profileName, profile);
+            configStore.activateProfile(profileName);
+            await onTransportChanged?.();
+            await persistConfig(configStore.get());
+          } catch (error) {
+            await configStore.load().catch(() => undefined);
+            configStore.activateProfile(previousProfileName);
+            await onTransportChanged?.();
+            throw error;
+          }
+        };
+      }
+      const runSetup = Setup.createTelegramSetupPromptRuntime({
+        getConfig: setupConfigStore.get,
+        setConfig: setupConfigStore.set,
+        setupGuard: setup,
+        getMe: TelegramApi.fetchTelegramBotIdentity,
+        persistConfig: persistSetupConfig,
+        startPolling: lockedPollingRuntime.start,
+        updateStatus,
+        recordRuntimeEvent,
+      });
+      const completion = await runSetup(ctx);
+      if (profileName && completion.status === "success") {
+        ctx.ui.notify(`Profile "${profileName}" saved and connected.`, "info");
+      }
+    },
+    getStatusLines,
+    reloadConfig: configStore.load,
+    hasBotToken: configStore.hasBotToken,
+    startPolling: async (ctx, options) => {
+      try {
+        return await lockedPollingRuntime.start(ctx, options);
+      } catch (error) {
+        recordRuntimeEvent("recovery", error, { phase: "polling-start" });
+        throw error;
+      }
+    },
+    stopPolling: stopPolling ?? lockedPollingRuntime.stop,
+    recoverPollingStart,
+    getDisconnectThreadName,
+    updateStatus,
+    getProfileNames: () =>
+      Config.getTelegramProfileNames(configStore.getStoredConfig()),
+    activateDefaultProfileConfig: async () => {
+      const previousProfileName = configStore.getActiveProfileName();
+      await configStore.load();
+      if (previousProfileName) {
+        await (stopPolling ?? lockedPollingRuntime.stop)();
+      }
+      configStore.activateProfile(undefined);
+      await onTransportChanged?.();
+    },
+    activateProfileConfig: async (_ctx, profileName) => {
+      const previousProfileName = configStore.getActiveProfileName();
+      await configStore.load();
+      if (!Config.isValidTelegramProfileName(profileName)) return false;
+      const storedConfig = configStore.getStoredConfig();
+      if (!storedConfig.profiles?.[profileName]) return false;
+      if (previousProfileName !== profileName) {
+        await (stopPolling ?? lockedPollingRuntime.stop)();
+      }
+      if (!configStore.activateProfile(profileName)) return false;
+      await onTransportChanged?.();
+      return true;
+    },
+  });
+}
+
+interface TelegramLifecycleBindingDeps {
+  pi: Pi.ExtensionAPI;
+  activityRuntime: Activity.TelegramActivityRuntime;
+  activityVerbosityRuntime?: TelegramActivityVerbosityRuntime;
+  assistantOutputRuntime: Pick<
+    Activity.TelegramAssistantOutputRuntime,
+    "start" | "waitForIdle" | "stop"
+  >;
+  sessionLifecycleRuntime: Pick<
+    Lifecycle.TelegramLifecycleRegistrationDeps,
+    "onSessionStart" | "onSessionShutdown" | "onModelSelect"
+  >;
+  configStore: Pick<
+    Config.TelegramConfigStore,
+    "get" | "getOutboundHandlers" | "hasBotToken" | "load"
+  >;
+  abort: Runtime.TelegramRuntimeAbortPort;
+  typing: Runtime.TelegramRuntimeTypingPort;
+  lifecycle: Runtime.TelegramRuntimeLifecyclePort;
+  activeTurnRuntime: Queue.TelegramActiveTurnStore<Queue.PendingTelegramTurn>;
+  telegramQueueStore: Queue.TelegramQueueStore<Pi.ExtensionContext>;
+  modelSwitchController: Model.TelegramModelSwitchController<
+    Pi.ExtensionContext,
+    Model.ScopedTelegramModel<ActivePiModel>
+  >;
+  previewRuntime: Preview.TelegramAssistantPreviewRuntime<
+    Pi.AgentEndEvent["messages"][number],
+    Keyboard.TelegramInlineKeyboardMarkup
+  >;
+  promptDispatchRuntime: Runtime.TelegramPromptDispatchRuntime<Pi.ExtensionContext>;
+  deferredQueueDispatchRuntime: Queue.TelegramDeferredQueueDispatchRuntime<Pi.ExtensionContext>;
+  modelContextAvailabilityRuntime: Prompts.TelegramModelContextAvailabilityRuntime;
+  disconnectOnQuit?: () => Promise<unknown>;
+  resolveAutomaticThreadCleanupEnabled?: () => boolean | Promise<boolean>;
+  buttonActionStore: OutboundHandlers.TelegramButtonActionStore;
+  callMultipart: OutboundHandlers.TelegramVoiceReplySenderDeps["sendMultipart"];
+  sendChatAction: NonNullable<
+    OutboundHandlers.TelegramVoiceReplySenderDeps["sendChatAction"]
+  >;
+  sendRecordVoiceAction: NonNullable<
+    OutboundHandlers.TelegramVoiceReplySenderDeps["sendRecordVoiceAction"]
+  >;
+  sendMarkdownReply: Queue.TelegramAgentEndHookRuntimeDeps<
+    Queue.PendingTelegramTurn,
+    Pi.ExtensionContext,
+    Pi.AgentEndEvent["messages"][number],
+    Keyboard.TelegramInlineKeyboardMarkup
+  >["sendMarkdownReply"];
+  sendTextReply: Queue.TelegramAgentEndHookRuntimeDeps<
+    Queue.PendingTelegramTurn,
+    Pi.ExtensionContext,
+    Pi.AgentEndEvent["messages"][number],
+    Keyboard.TelegramInlineKeyboardMarkup
+  >["sendTextReply"] &
+    NonNullable<OutboundHandlers.TelegramVoiceReplySenderDeps["sendTextReply"]>;
+  dispatchNextQueuedTelegramTurn: (ctx: Pi.ExtensionContext) => void;
+  answerGuestQuery: TelegramApi.TelegramBridgeApiRuntime["answerGuestQuery"];
+  deleteMessage: TelegramApi.TelegramBridgeApiRuntime["deleteMessage"];
+  sendGuestReply: NonNullable<
+    Queue.TelegramAgentEndHookRuntimeDeps<
+      Queue.PendingTelegramTurn,
+      Pi.ExtensionContext,
+      Pi.AgentEndEvent["messages"][number],
+      Keyboard.TelegramInlineKeyboardMarkup
+    >["sendGuestReply"]
+  >;
+  finalizeMarkdownPreview: Queue.TelegramAgentEndHookRuntimeDeps<
+    Queue.PendingTelegramTurn,
+    Pi.ExtensionContext,
+    Pi.AgentEndEvent["messages"][number],
+    Keyboard.TelegramInlineKeyboardMarkup
+  >["finalizeMarkdownPreview"];
+  proactivePushTargetGetter: () => Queue.TelegramQueueTarget | undefined;
+  getAssistantRenderingMode: () => "rich" | "html";
+  recordMessageOwnership?: (input: {
+    chatId: number;
+    messageId: number;
+    target?: Queue.TelegramQueueTarget;
+  }) => void;
+  canSendAgentActivity: (ctx: Pi.ExtensionContext) => boolean;
+  isSessionContextActive: (ctx: Pi.ExtensionContext) => boolean;
+  isTurnTransportActive?: (turn: Queue.PendingTelegramTurn) => boolean;
+  updateStatus: TelegramBridgeStatusUpdater;
+  recordRuntimeEvent: TelegramRuntimeEventRecorder;
+}
+
+export function registerTelegramLifecycleRuntimeHooks({
+  pi,
+  activityRuntime,
+  activityVerbosityRuntime,
+  assistantOutputRuntime,
+  sessionLifecycleRuntime,
+  configStore,
+  abort,
+  typing,
+  lifecycle,
+  activeTurnRuntime,
+  telegramQueueStore,
+  modelSwitchController,
+  previewRuntime,
+  promptDispatchRuntime,
+  deferredQueueDispatchRuntime,
+  modelContextAvailabilityRuntime,
+  disconnectOnQuit,
+  resolveAutomaticThreadCleanupEnabled,
+  buttonActionStore,
+  callMultipart,
+  sendChatAction,
+  sendRecordVoiceAction,
+  sendMarkdownReply,
+  sendTextReply,
+  dispatchNextQueuedTelegramTurn,
+  answerGuestQuery,
+  deleteMessage,
+  sendGuestReply,
+  finalizeMarkdownPreview,
+  proactivePushTargetGetter,
+  getAssistantRenderingMode,
+  recordMessageOwnership,
+  canSendAgentActivity,
+  isSessionContextActive = () => true,
+  isTurnTransportActive,
+  updateStatus,
+  recordRuntimeEvent,
+}: TelegramLifecycleBindingDeps): void {
+  const agentEndResetter = Runtime.createTelegramAgentEndResetter({
+    abort,
+    typing,
+    clearActiveTurn: activeTurnRuntime.clear,
+    resetToolExecutions: lifecycle.resetActiveToolExecutions,
+    clearPendingModelSwitch: modelSwitchController.clearPendingSwitch,
+    clearDispatchPending: lifecycle.clearDispatchPending,
+  });
+  const queuedAttachmentSender =
+    OutboundAttachments.createTelegramQueuedOutboundAttachmentSender({
+      sendMultipart: callMultipart,
+      sendTextReply,
+      recordRuntimeEvent,
+    });
+  const richAttachmentSender =
+    OutboundAttachments.createTelegramRichOutboundAttachmentSender({
+      sendMultipart: callMultipart,
+      getRenderingMode: getAssistantRenderingMode,
+      recordOwnership: recordMessageOwnership,
+      recordRuntimeEvent,
+    });
+  const sendGuestAttachment = async (
+    turn: Queue.PendingTelegramTurn,
+    attachment: Queue.QueuedAttachment,
+    caption?: string,
+  ): Promise<void> => {
+    const stagingTarget = proactivePushTargetGetter();
+    const stagingChatId = stagingTarget?.chatId;
+    if (stagingChatId === undefined) {
+      throw new Error(
+        "Guest attachment staging requires a paired Telegram chat",
+      );
+    }
+    await OutboundAttachments.deliverTelegramGuestCachedAttachment({
+      guestQueryId: turn.guestQueryId!,
+      stagingChatId,
+      stagingTarget,
+      attachment,
+      caption,
+      sendMultipart: callMultipart,
+      answerGuestQuery: (guestQueryId, result) =>
+        answerGuestQuery(guestQueryId, undefined, { result }),
+      answerGuestText: (guestQueryId, text) =>
+        answerGuestQuery(guestQueryId, text),
+      fallbackText:
+        caption ||
+        "Telegram bridge could not deliver the requested attachment.",
+      deleteMessage,
+      recordRuntimeEvent,
+    });
+  };
+  const outboundReplyPlanner =
+    OutboundHandlers.createTelegramOutboundReplyPlanner(buttonActionStore);
+  const voiceReplySenderDeps = {
+    execCommand: CommandTemplates.execCommandTemplate,
+    sendMultipart: callMultipart,
+    sendTextReply,
+    sendChatAction,
+    sendRecordVoiceAction,
+    getHandlers: configStore.getOutboundHandlers,
+    recordRuntimeEvent,
+  };
+  const outboundReplyArtifactSender =
+    OutboundHandlers.createTelegramOutboundReplyArtifactSender(
+      voiceReplySenderDeps,
+    );
+  const sendGuestVoiceReply = async (
+    turn: Queue.PendingTelegramTurn,
+    plan: OutboundHandlers.TelegramOutboundReplyPlan,
+    caption?: string,
+  ): Promise<void> => {
+    const stagingTarget = proactivePushTargetGetter();
+    const stagingChatId = stagingTarget?.chatId;
+    if (stagingChatId === undefined) {
+      throw new Error("Guest voice staging requires a paired Telegram chat");
+    }
+    const guestVoiceSender =
+      OutboundHandlers.createTelegramOutboundReplyArtifactSender({
+        ...voiceReplySenderDeps,
+        sendChatAction: undefined,
+        sendRecordVoiceAction: undefined,
+        sendMultipart: async (
+          _method,
+          _fields,
+          _fileField,
+          filePath,
+          fileName,
+        ) => {
+          try {
+            await OutboundAttachments.deliverTelegramGuestCachedAttachment({
+              guestQueryId: turn.guestQueryId!,
+              stagingChatId,
+              stagingTarget,
+              attachment: { path: filePath, fileName },
+              caption,
+              sendMultipart: callMultipart,
+              answerGuestQuery: (guestQueryId, result) =>
+                answerGuestQuery(guestQueryId, undefined, { result }),
+              answerGuestText: (guestQueryId, text) =>
+                answerGuestQuery(guestQueryId, text),
+              fallbackText:
+                caption || "Telegram bridge could not deliver the voice reply.",
+              deleteMessage,
+              recordRuntimeEvent,
+            });
+          } catch (error) {
+            recordRuntimeEvent("delivery", error, {
+              phase: "guest-voice-answer",
+              guestQueryId: turn.guestQueryId,
+            });
+          }
+          return {};
+        },
+      });
+    await guestVoiceSender(
+      turn,
+      {
+        ...plan,
+        ...(plan.voiceReplies?.length
+          ? { voiceReplies: [plan.voiceReplies[0]!] }
+          : {}),
+      },
+      { replyToPrompt: false },
+    );
+  };
+  const agentLifecycleHooks = Queue.createTelegramAgentLifecycleHooks<
+    Queue.PendingTelegramTurn,
+    Pi.ExtensionContext,
+    unknown,
+    Keyboard.TelegramInlineKeyboardMarkup
+  >({
+    setAbortHandler: Runtime.createTelegramContextAbortHandlerSetter(abort),
+    getQueuedItems: telegramQueueStore.getQueuedItems,
+    hasPendingDispatch: lifecycle.hasDispatchPending,
+    hasActiveTurn: activeTurnRuntime.has,
+    resetToolExecutions: lifecycle.resetActiveToolExecutions,
+    resetPendingModelSwitch: modelSwitchController.clearPendingSwitch,
+    setQueuedItems: telegramQueueStore.setQueuedItems,
+    clearDispatchPending: lifecycle.clearDispatchPending,
+    setFoldQueuedPromptsIntoHistory: lifecycle.setFoldQueuedPromptsIntoHistory,
+    setActiveTurn: activeTurnRuntime.set,
+    createPreviewState: previewRuntime.resetState,
+    startTypingLoop: (ctx) => {
+      const turn = activeTurnRuntime.get();
+      promptDispatchRuntime.startTypingLoop(ctx, turn?.chatId, {
+        target: turn?.target,
+      });
+    },
+    updateStatus,
+    getActiveTurn: activeTurnRuntime.get,
+    loadConfig: configStore.load,
+    extractAssistant: Replies.extractLatestAssistantMessageText,
+    getFoldQueuedPromptsIntoHistory:
+      lifecycle.shouldFoldQueuedPromptsIntoHistory,
+    resetRuntimeState: agentEndResetter,
+    isSessionActive: isSessionContextActive,
+    isTurnTransportActive,
+    waitForTypingIdle: typing.waitForIdle,
+    async waitForActivityIdle() {
+      const assistantIdle = assistantOutputRuntime.waitForIdle(true);
+      await activityVerbosityRuntime?.waitForIdle();
+      await assistantIdle;
+    },
+    dispatchNextQueuedTelegramTurn,
+    requestDeferredDispatchNextQueuedTelegramTurn:
+      deferredQueueDispatchRuntime.request,
+    scheduleActiveTurnDelivery(task) {
+      const timer = setTimeout(() => {
+        void task().catch((error) => {
+          recordRuntimeEvent("delivery", error, {
+            phase: "agent-end-background-delivery",
+          });
+        });
+      }, 0);
+      timer.unref?.();
+    },
+    clearPreview: previewRuntime.clear,
+    setPreviewPendingText: previewRuntime.setPendingText,
+    finalizeMarkdownPreview,
+    sendMarkdownReply,
+    sendTextReply,
+    sendQueuedAttachments: queuedAttachmentSender,
+    sendRichAttachmentReply: richAttachmentSender,
+    answerGuestQuery,
+    sendGuestReply,
+    sendGuestAttachment,
+    sendGuestVoiceReply,
+    planOutboundReply: outboundReplyPlanner,
+    sendOutboundReplyArtifacts: outboundReplyArtifactSender,
+    recordRuntimeEvent,
+    getActiveToolExecutions: lifecycle.getActiveToolExecutions,
+    setActiveToolExecutions: lifecycle.setActiveToolExecutions,
+    triggerPendingModelSwitchAbort: modelSwitchController.triggerPendingAbort,
+  });
+  Lifecycle.setResetTransportReplyDedup(Replies.resetTransportReplyDedup);
+  const agentStartWithDedupReset = Lifecycle.createAgentStartDedupHook(
+    agentLifecycleHooks.onAgentStart,
+  );
+  const startAgentActivityTypingLoop = (ctx: Pi.ExtensionContext): boolean => {
+    if (!canSendAgentActivity(ctx)) return false;
+    const turn = activeTurnRuntime.get();
+    const target = turn?.target ?? proactivePushTargetGetter();
+    promptDispatchRuntime.startTypingLoop(ctx, turn?.chatId ?? target?.chatId, {
+      target,
+    });
+    return true;
+  };
+  const startActiveTurnTypingLoop = (ctx: Pi.ExtensionContext): void => {
+    const turn = activeTurnRuntime.get();
+    promptDispatchRuntime.startTypingLoop(ctx, turn?.chatId, {
+      target: turn?.target,
+    });
+  };
+  const compactionObserver = Lifecycle.createTelegramCompactionObserverRuntime({
+    isContextActive: isSessionContextActive,
+    setCompactionInProgress: lifecycle.setCompactionInProgress,
+    updateStatus,
+    startTypingLoop: startAgentActivityTypingLoop,
+    stopTypingLoop: typing.stop,
+    requestDeferredDispatchNextQueuedTelegramTurn:
+      deferredQueueDispatchRuntime.request,
+    dispatchNextQueuedTelegramTurn,
+    recordRuntimeEvent,
+    onCompactionAbandoned: activityRuntime.onCompactionAbandoned,
+  });
+  const messageActivityTypingHooks =
+    Lifecycle.createTelegramMessageActivityTypingHooks({
+      hasActiveTurn: activeTurnRuntime.has,
+      startTypingLoop: startActiveTurnTypingLoop,
+      onMessageStart: previewRuntime.onMessageStart,
+      onMessageUpdate: previewRuntime.onMessageUpdate,
+      recordRuntimeEvent,
+    });
+  const messageActivityHooks = messageActivityTypingHooks;
+  Lifecycle.registerTelegramLifecycleHooks(pi, {
+    isSessionActive: isSessionContextActive,
+    ...sessionLifecycleRuntime,
+    ...agentLifecycleHooks,
+    onInput(event) {
+      activityRuntime.recordInputSource(event.source ?? "unknown");
+    },
+    async onSessionStart(event, ctx) {
+      previewRuntime.invalidate();
+      assistantOutputRuntime.start();
+      activityRuntime.onSessionStart?.();
+      activityVerbosityRuntime?.reset();
+      modelContextAvailabilityRuntime.reconcile();
+      await sessionLifecycleRuntime.onSessionStart(event, ctx);
+    },
+    async onSessionShutdown(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      agentLifecycleHooks.clearRetainedAgentEnd();
+      activityRuntime.onSessionShutdown();
+      activityVerbosityRuntime?.reset();
+      assistantOutputRuntime.stop();
+      compactionObserver.onSessionShutdown();
+      if (event.reason === "quit" && disconnectOnQuit) {
+        try {
+          const automaticCleanupEnabled =
+            (await resolveAutomaticThreadCleanupEnabled?.()) ?? true;
+          if (automaticCleanupEnabled) await disconnectOnQuit();
+        } catch (error) {
+          recordRuntimeEvent("session", error, {
+            phase: "automatic-disconnect-on-quit",
+          });
+        }
+      }
+      await sessionLifecycleRuntime.onSessionShutdown(event, ctx);
+    },
+    onSessionBeforeCompact(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      activityRuntime.onCompactionStart(Pi.getSessionCompactionReason(event));
+      compactionObserver.onSessionBeforeCompact(event, ctx);
+    },
+    onSessionCompact(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      activityRuntime.onCompactionEnd(Pi.getSessionCompactionReason(event));
+      compactionObserver.onSessionCompact(event, ctx);
+    },
+    async onAgentStart(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      await agentStartWithDedupReset(event, ctx);
+      activityRuntime.onAgentStart(activeTurnRuntime.get()?.target, activeTurnRuntime.get());
+      const ownedTurn = activeTurnRuntime.get();
+      if (ownedTurn) {
+        ownedTurn.deliveryActivityId = activityRuntime.getActivityId?.();
+        ownedTurn.deliveryRequestId ??= ownedTurn.deliveryActivityId;
+      }
+      startAgentActivityTypingLoop(ctx);
+    },
+    async onToolExecutionStart(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      agentLifecycleHooks.onToolExecutionStart();
+      activityRuntime.onToolStart({
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.args,
+      });
+    },
+    onToolExecutionUpdate(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      activityRuntime.onToolUpdate({
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        update: event.partialResult,
+      });
+    },
+    async onToolExecutionEnd(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      activityRuntime.onToolEnd({
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        result: event.result,
+        isError: event.isError,
+      });
+      agentLifecycleHooks.onToolExecutionEnd(event, ctx);
+    },
+    async onMessageStart(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      await messageActivityHooks.onMessageStart(event, ctx);
+    },
+    async onMessageUpdate(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      if (event.assistantMessageEvent) {
+        activityRuntime.onAssistantEvent(
+          event.assistantMessageEvent as Activity.TelegramAssistantStreamEvent,
+        );
+      }
+      await messageActivityHooks.onMessageUpdate(event, ctx);
+    },
+    async onAgentEnd(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      activityRuntime.onAgentEnd();
+      await agentLifecycleHooks.onAgentEnd(event, ctx);
+    },
+    async onAgentSettled(event, ctx) {
+      if (!isSessionContextActive(ctx)) return;
+      const settlingActivity = activityRuntime.getActivityId?.();
+      await agentLifecycleHooks.onAgentSettled(event, ctx);
+      if (ctx.isIdle()) activityRuntime.onAgentSettled(settlingActivity);
+      modelContextAvailabilityRuntime.reconcile();
+    },
+    onBeforeAgentStart: Prompts.createTelegramProactiveBeforeAgentStartHook({
+      reconcileAvailability: modelContextAvailabilityRuntime.reconcile,
+      isAvailable: canSendAgentActivity,
+    }),
+  });
+}

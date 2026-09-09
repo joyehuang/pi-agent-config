@@ -1,0 +1,69 @@
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -85,6 +85,7 @@
+     _unsubscribeAgent;
+     _eventListeners = [];
+     _isAgentRunActive = false;
++    _settlementAborted = false;
+     _idleWaitPromise;
+     _resolveIdleWait;
+     /** Tracks pending steering messages for UI display. Removed when delivered. */
+@@ -326,9 +327,10 @@
+     }
+     async _emitAgentSettled() {
+         this._isAgentRunActive = false;
++        const event = { type: "agent_settled", aborted: this._settlementAborted };
+         try {
+-            await this._extensionRunner.emit({ type: "agent_settled" });
+-            this._emit({ type: "agent_settled" });
++            await this._extensionRunner.emit(event);
++            this._emit(event);
+         }
+         finally {
+             this._resolveIdleWaitIfIdle();
+@@ -742,6 +744,7 @@
+     // Prompting
+     // =========================================================================
+     async _runAgentPrompt(messages) {
++        this._settlementAborted = false;
+         this._isAgentRunActive = true;
+         try {
+             await this.agent.prompt(messages);
+@@ -1166,6 +1169,7 @@
+      * Abort current operation and wait for agent to become idle.
+      */
+     async abort() {
++        if (this._isAgentRunActive) this._settlementAborted = true;
+         this.abortRetry();
+         this.agent.abort();
+         await this.waitForIdle();
+@@ -2168,6 +2172,7 @@
+      * Cancel in-progress retry.
+      */
+     abortRetry() {
++        if (this._retryAbortController) this._settlementAborted = true;
+         this._retryAbortController?.abort();
+     }
+     /** Whether auto-retry is currently in progress */
+--- a/dist/core/agent-session.d.ts
++++ b/dist/core/agent-session.d.ts
+@@ -45,6 +45,8 @@
+     willRetry: boolean;
+ } | {
+     type: "agent_settled";
++    /** Local compatibility patch: explicit cancellation in this logical run. */
++    aborted?: boolean;
+ } | {
+     type: "queue_update";
+     steering: readonly string[];
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -544,6 +544,8 @@
+ /** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
+ export interface AgentSettledEvent {
+     type: "agent_settled";
++    /** Local compatibility patch: includes cancellation during native retry backoff. */
++    aborted?: boolean;
+ }
+ /** Fired at the start of each turn */
+ export interface TurnStartEvent {

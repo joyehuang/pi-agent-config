@@ -71,18 +71,7 @@ console.log(JSON.stringify({passed:results},null,2));
  hooks.session_shutdown();assert.equal(globalThis[key],undefined);
  console.log('owner binding: passed');
 }
-// Actual preserved guard, no model: one follow-up, then a real Telegram turn.
-{
- const {default:guard}=await import('../extensions/empty-reply-guard.ts');
- const hooks={};let injections=0;guard({on:(n,c)=>hooks[n]=c,sendUserMessage:()=>injections++});
- await hooks.before_agent_start({prompt:'question'});
- const e={messages:[{role:'assistant',content:[],stopReason:'stop'}]},ctx={ui:{notify:()=>{}}};
- await hooks.agent_end(e,ctx);await hooks.agent_end(e,ctx);assert.equal(injections,1);
- const h=runtime();h.start();h.rt.onAgentEnd();h.start();h.text('guard follow-up');await h.output.waitForIdle();h.rt.onAgentEnd();
- const t=turn();h.start(t.target,t);h.text('user reply');await h.output.waitForIdle();await h.queue(t,'user reply');
- assert.deepEqual(h.sent.map(s=>s.text),['guard follow-up','user reply']);h.close();
- console.log('preserved empty guard followup: passed');
-}
+// Empty guard now has its own real SessionManager and native retry suites.
 {
  const h=runtime();
  for(let i=0;i<2;i++){const t=turn(1);h.start(t.target,t);h.text('identical legitimate answer');await h.output.waitForIdle();await h.queue(t,'identical legitimate answer');h.rt.onAgentEnd()}
@@ -103,7 +92,7 @@ console.log(JSON.stringify({passed:results},null,2));
  const {createTelegramBusFollowerApiCaller}=await imp('bus-follower');
  const {handleFollowerApiCall}=await imp('bus-leader');
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bus-ledger-'));
- const socketDir=fs.mkdtempSync('/tmp/pi-fix-bus-');
+ const socketDir=fs.mkdtempSync(path.join(process.env.PI_FIX_SOCKET_DIR ?? os.tmpdir(),'bus-'));
  const socket=path.join(socketDir,'bus.sock');
  let generation='g',calls=0,lastEnvelope,drop=false,sequence=0;
  const follower={instanceId:'f',registrationGeneration:generation,target:{chatId:123,threadId:8}};

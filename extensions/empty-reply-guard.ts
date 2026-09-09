@@ -1,78 +1,105 @@
-/**
- * empty-reply-guard — 空回复保险
- *
- * 现象：provider 偶发在 turn 边界返回空 completion（无文字、无工具调用），
- * pi 把它当正常 turn 结束，导致整轮没有任何最终回复（Telegram 上表现为
- * 只有中间消息、没有 quote 回复）。session 日志显示 2026-08-11 起跨模型
- * （deepseek / glm）共发生 20+ 次。
- *
- * 修复：agent_end 时检查本轮最后一条 assistant 消息是否为空；为空则自动
- * 注入一条 follow-up 用户消息触发续答（每轮最多重试 1 次，防死循环）。
- * 真正的用户新输入会重置重试计数。
+/** Empty completion recovery, after Pi's native retry/compaction/follow-ups settle.
+ * The active SessionManager branch is authoritative; agent_end is only a run.
+ * No transport dependency: this also protects local TUI and RPC sessions.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const RETRY_PROMPT =
-	"(系统自动重试) 你上一条回复是空的，没有输出任何文字。请基于上面已完成的工作和工具结果，直接给出本轮的最终回复。";
+  "(系统自动重试) 你上一条回复是空的，没有输出任何文字。请基于上面已完成的工作和工具结果，直接给出本轮的最终回复。";
+const MARKER = "[empty-reply-recovery:";
 
-interface TextPart {
-	type: string
-	text?: string
+type Message = { role: string; content?: unknown; stopReason?: string };
+function text(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter(p => p?.type === "text").map(p => p.text ?? "").join("");
 }
-
-function isEmptyAssistantMessage(message: unknown): boolean {
-	const m = message as { role?: string; content?: unknown; stopReason?: string } | undefined
-	if (!m || m.role !== "assistant") return false
-	// 用户主动中断导致的空消息不重试
-	if (m.stopReason === "aborted") return false
-	const content = m.content
-	if (content == null) return true
-	if (typeof content === "string") return content.trim() === ""
-	if (Array.isArray(content)) {
-		if (content.length === 0) return true
-		const parts = content as TextPart[]
-		const hasToolCall = parts.some((p) => p.type === "toolCall" || p.type === "tool_use")
-		if (hasToolCall) return false
-		const text = parts
-			.filter((p) => p.type === "text")
-			.map((p) => p.text ?? "")
-			.join("")
-			.trim()
-		return text === ""
-	}
-	return false
+function empty(message: Message | undefined): boolean {
+  if (message?.role !== "assistant" || !["stop", "length", "error"].includes(message.stopReason ?? "")) return false;
+  if (Array.isArray(message.content) && message.content.some(p => p?.type === "toolCall" || p?.type === "tool_use")) return false;
+  return !text(message.content).trim();
 }
 
 export default function (pi: ExtensionAPI) {
-	let retriesThisPrompt = 0
-	const MAX_RETRIES = 1
+  let session: string | undefined;
+  let cursor: string | null = null;
+  let request: { id: string; retries: number; retryText?: string; admitted?: boolean } | undefined;
+  let terminal: Message | undefined;
+  let completed = false;
 
-	// 真正的用户输入（非本扩展注入的重试消息）重置计数
-	pi.on("before_agent_start", async (event) => {
-		if (event.prompt !== RETRY_PROMPT) {
-			retriesThisPrompt = 0
-		}
-	})
+  function reset(ctx: ExtensionContext) {
+    session = ctx.sessionManager.getSessionId();
+    cursor = ctx.sessionManager.getLeafId();
+    request = undefined;
+    terminal = undefined;
+    completed = false;
+  }
+  // Read only entries appended since the last turn. getEntry is indexed. Never
+  // scan other branches or resurrect a previous autonomous task after reload.
+  function sync(ctx: ExtensionContext): boolean {
+    if (session !== ctx.sessionManager.getSessionId()) return false;
+    const sm = ctx.sessionManager;
+    const pending = [];
+    let id = sm.getLeafId();
+    while (id !== cursor) {
+      if (!id || pending.length >= 2048) { reset(ctx); return false; }
+      const entry = sm.getEntry(id);
+      if (!entry) { reset(ctx); return false; }
+      pending.push(entry);
+      id = entry.parentId;
+    }
+    for (const entry of pending.reverse()) {
+      if (entry.type !== "message") continue;
+      const m = entry.message;
+      if (m.role === "user") {
+        if (!request?.admitted || text(m.content) !== request.retryText) {
+          request = { id: entry.id, retries: 0 };
+        }
+        terminal = undefined;
+        completed = false;
+      } else if (m.role === "assistant") {
+        terminal = m;
+        const tools = Array.isArray(m.content) && m.content.some(p => p.type === "toolCall");
+        if (tools) completed = false;
+        else if (["stop", "length"].includes(m.stopReason) && text(m.content).trim()) completed = true;
+      } else if (m.role === "toolResult") {
+        // A progress/tool-calling message is not a terminal completion.
+        terminal = undefined;
+        completed = false;
+      }
+    }
+    cursor = sm.getLeafId();
+    return true;
+  }
 
-	pi.on("agent_end", async (event, ctx) => {
-		const messages = (event as { messages?: unknown[] }).messages ?? []
-		let lastAssistant: unknown
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const m = messages[i] as { role?: string }
-			if (m?.role === "assistant") {
-				lastAssistant = m
-				break
-			}
-		}
-		if (!isEmptyAssistantMessage(lastAssistant)) return
-
-		if (retriesThisPrompt >= MAX_RETRIES) {
-			ctx.ui.notify?.("回复为空且自动重试已用尽", "error")
-			return
-		}
-
-		retriesThisPrompt++
-		// agent 已结束（非 streaming），sendUserMessage 会立即触发新 turn
-		pi.sendUserMessage(RETRY_PROMPT, { deliverAs: "followUp", triggerTurn: true })
-	})
+  pi.on("session_start", (_event, ctx) => reset(ctx));
+  pi.on("session_tree", (_event, ctx) => reset(ctx));
+  pi.on("session_shutdown", () => { session = undefined; request = undefined; terminal = undefined; });
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (session === undefined) reset(ctx);
+    else sync(ctx);
+  });
+  pi.on("turn_end", (_event, ctx) => { sync(ctx); });
+  // A stale/mismatched event.messages list cannot override committed evidence.
+  pi.on("agent_end", (_event, ctx) => { sync(ctx); });
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "extension" || !event.text.startsWith(`${RETRY_PROMPT}\n${MARKER}`)) return;
+    if (!sync(ctx) || !request || event.text !== request.retryText || request.admitted || completed || !empty(terminal)) {
+      return { action: "handled" };
+    }
+    request.admitted = true;
+  });
+  pi.on("agent_settled", (event, ctx) => {
+    if ((event as { aborted?: boolean }).aborted) return;
+    if (!sync(ctx) || !ctx.isIdle() || ctx.hasPendingMessages() || ctx.signal?.aborted || !request || completed || !empty(terminal)) return;
+    if (request.retries >= 1) {
+      if (ctx.hasUI) ctx.ui.notify("回复为空且自动重试已用尽", "error");
+      return;
+    }
+    // Reserve the budget before the void API can synchronously emit input.
+    request.retries = 1;
+    request.retryText = `${RETRY_PROMPT}\n${MARKER}${randomUUID()}]`;
+    pi.sendUserMessage(request.retryText, { deliverAs: "followUp" });
+  });
 }

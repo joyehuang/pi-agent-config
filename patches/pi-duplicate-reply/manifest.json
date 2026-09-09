@@ -1,0 +1,145 @@
+{
+  "patch_id": "duplicate-reply-v1",
+  "package": "@llblab/pi-telegram",
+  "version": "0.27.12",
+  "pi_version": "0.84.1",
+  "files": {
+    "lib/send-queue.ts": {
+      "before": "c2668445252e9b8da9f86a8dc08d6ed3fffe669f37c94712b69529970e89d4db",
+      "after": "593592b904f27f4f195dd6f06719ba26b7e68fe79586c30403499f07550042dc",
+      "source": "patches/pi-duplicate-reply/files/lib/send-queue.ts"
+    },
+    "lib/bindings.ts": {
+      "before": "07a985dd0d3fc6148bd2eb197d459a9feaa3c2d00ed74b3cab531bd26655f6d8",
+      "after": "17d2a56990ea81e35c00260f455ee19adc71c4d123108970664679a0abc49f3d",
+      "source": "patches/pi-duplicate-reply/files/lib/bindings.ts"
+    },
+    "empty-reply-guard.ts": {
+      "before": "c5c304e8f790d1efa56e1e04945d14b41fb0861846c5c15057b277d1e59db225",
+      "after": "118a75cb083abc3715bbe7915ab55c6ddcaaf05cd4ff783fbc1778f974034419",
+      "source": "extensions/empty-reply-guard.ts"
+    }
+  },
+  "guards": {
+    "index.ts": "f561b2ade1bec64605cb1f25a81f4baa6578171f3a15187eddd5ae7660a3aa34",
+    "lib/menu-thinking.ts": "3aca9b29ab156942a1317a923c5d1fba6eb43fef1acb8b213de02cfa9cfc5b3c",
+    "lib/keyboard.ts": "b710f445db7812e2b61ac59d2e94f8edf0e48f1016800e748bd1672f657ccadc",
+    "lib/status.ts": "d03c885812237e28b1f97beb393cb115f4f8c51b3882da9277045e468ebccd22",
+    "lib/thread-reconciler.ts": "10c8839d2b3f534c5a7510ef90d9a413783bffbccb6f8d90604b3d7483190dcf",
+    "lib/commands.ts": "98a2ebcdbdc8fe48b93c0e65f8d48eb2958edf5ef538c3350bf092bb92f66576",
+    "lib/menu-status.ts": "730096be3ae4228edafb70d0f141e038e63bc92772c5bd6e72a938d12ac7df5b",
+    "lib/polling.ts": "d0ad3e741013bf35e89fd05b6ebe02cae507c51d77ac634ced6b3a21bb295040",
+    "lib/menu-settings.ts": "02d59333d600079fe0099f269f8a1c86fe1fb8b4577d640cefe06814de728ee7",
+    "lib/outbound-attachments.ts": "9a4770c035c1995d4463f8b6ff0edc2e504a22a200033507046c02fc64ed8511",
+    "lib/target.ts": "84f149b46614dd1f30e2f49e84eb523769410fc98cfc187692c544f3135f6204",
+    "lib/routing.ts": "9b3fd1a3b55b44602e94e45368e9ae13f7518ea135cdc4b7f9f8b955d0ba06e9",
+    "lib/telegram-api.ts": "49c72f559141bb2989c2619c429ef165f28f3752f4a230391daeb401fe6c6e9f",
+    "lib/lifecycle.ts": "63749ebd4ae5d583d846bcff9594c0169c96b9089d3cdf8069274134276a91a7",
+    "lib/menu-queue.ts": "d24e4e77672812c04722031396831d3b036dcc5afa8d034afbc28c86e6e7f544",
+    "lib/outbound-buttons.ts": "d99a3cba40827d06e8462137cf49260884bc3d0494b9f0b87cc438c5b44dd8b3",
+    "lib/logs.ts": "8e2cd18eb362ff0dd34ad407a3207e1515502abfc5fc0c39ac9bcf7ac916ed4f",
+    "lib/prompt-templates.ts": "a9d8da6a9f1aee3bcb12db82b47b102c66e6fcd7782149bb90ca6cd532b258aa",
+    "lib/turns.ts": "f9a5b4dae45a13c6367ec4ab489cbd5ccb224c7a444a99c39c58f333cf2be3bc",
+    "lib/setup.ts": "21144a14223dc8e447fb2f11ff62b4b6dc4fc47fd528c4016843ed81ad7cca32",
+    "lib/outbound.ts": "d67e480ddc0b63eabdd042489b7ca5db4f5c080c6a5869aa1bab06e9772fc25d",
+    "lib/threads.ts": "a7db1c3e8cda0dffd6e3805161a5623f409159ef0996c97cf174bc8f6f01da33",
+    "lib/bus.ts": "ef60c1ea0cff36a5795640c3536d301b2cd28324166ebae785627a091ef7dcbb",
+    "lib/menu.ts": "078a91f9c5845616002c0e9a56c562d8226e7471e5f2dd8e6736aa8d6a607162",
+    "lib/voice.ts": "231c1c18d6fbfd77fe1968c5d1c60ad99f8c0b9d42789ca4c7b467e4a71e3182",
+    "lib/bus-leader.ts": "04021a1a7eb6b5844e133da16db2b1b670d53aff38ab0b137e398363dac13cf9",
+    "lib/inbound.ts": "a4e9d229596b79ce5a1c40f45283136aeae07f8d79be9f6c81cc066b9a2eb268",
+    "lib/command-templates.ts": "bd0a8a3acc0a889117f87c1ad9423cc46ba96fd3ea7d8e728c0f706ed7a87b42",
+    "lib/model.ts": "9b782a5ef39914adcf56d0416e8419e58fc163cbdbc187416b4ea9be75710128",
+    "lib/bus-api.ts": "943c4b7d58fbbcafe57bfd1007400a1147b0e02b95b733f95ddffe048ff039f8",
+    "lib/bus-follower.ts": "2418330f863284cade17bbbdba7c2ee6ebf23c4bcc5babc4204166cbcf8ceba6",
+    "lib/bus-transport.ts": "67a2cf97a1567d11b658cc008196a770345aee2984d8859ba99101f0ec609b58",
+    "lib/prompts.ts": "7825439b1ed33fc025b71411564b16a8436ea7ab81a7b702bbca370f5c7ab709",
+    "lib/runtime.ts": "6256e74bb1038a941c114888b8db18e84b9e6773084ff5126e8f813a49e66992",
+    "lib/pi.ts": "ef7577e92201e9e9f9c8632338c2b04d6022dd1d03aadf08fdf0555ba7a374b7",
+    "lib/activity-verbosity.ts": "834c2535f08f44b353dbcce70e4f15400a6e9e86228ad04de4b232ef36a7abf8",
+    "lib/locks.ts": "4186c897bc0e54018e366a83957ef5f4a4049a1ae9081a78838c0faefb382c1d",
+    "lib/activity.ts": "acaa13d883ca17bf32add3d7c9551e2cbfde068ddcbbb8b21c712ba02edd9c43",
+    "lib/updates.ts": "2e076e87dac09719b0edf69237d0b55664c7182f1b90851453bec9cf8f2c8233",
+    "lib/outbound-voice.ts": "eff820ebf921bf479e0aff33bd29f21e9e3df6b892ec4bb9536ccb009af22970",
+    "lib/rendering.ts": "64b2d9d5af6925ddfaddd764bca66dcc4cdced43039ad568b726f5a4240403e5",
+    "lib/paths.ts": "7233d5c397fc40f9a5e6cdcab599e1d5983504ea1ed9a31f2b75b4f03edcdac2",
+    "lib/sections.ts": "926c922585fc1d8d4028e147bcdea951b231f4ee8df245cd23fcd7e8ba1d0271",
+    "lib/config.ts": "54b4b68e99317ca8e4c4d29f3e0755c6d09f109e20d555f8431c3ba4516cddee",
+    "lib/recovery.ts": "b5c81777d59610c8972c98a0979b3abe6a87fa89a0c4086f87c3acc630b36f9f",
+    "lib/menu-model.ts": "221bd8ef01e494cf70cadf2ae9495c35db90cf1b773299a9797c2881a9e3f089",
+    "lib/media.ts": "7b82631368cf851792fde4034d99d245ffa356d324fa9ee34f909029b98bb4db",
+    "lib/text-groups.ts": "45a97dd793f0427e8bfcd119ecd68fc93acd5b975e610de9a9f040ab34bfc629",
+    "lib/delivery.ts": "d4db4417b0a92686de16378275745f09aff2a556d8bddb48488ebd8a2b3e6c38",
+    "lib/replies.ts": "211ceefe642300b748e034ddb8e13df17f45837692c58fb81fd3eb5b33687798",
+    "lib/outbound-markup.ts": "78bf5c66d3f03e652aec7ec618b9ef8c742f18dae76a19a13f0689123b816e79",
+    "lib/ownership.ts": "ffdb5051b1acce47f8b1513628bec53d3810afdc6681604d2937ff2bf330b4c4",
+    "lib/time-injection.ts": "42397d66a3b74e27385ed65713144f266dba78d957eac6e5f5c64d718a6df894",
+    "lib/preview.ts": "157cb8c3b7bc971acc220df6f827198225af9ec70d470207e919f7faa2e2196e",
+    "lib/queue.ts": "3423f6fefd1b1baede442355313e076efa73680e92f0e2a35d4d57f235dfbe90",
+    "lib/sync.ts": "86af81d85c151159a9b2325426d48f436a659a881a47df53be67115e5041783f",
+    "lib/agent-messages.ts": "7277b5dd2a46341781c3f7e1dbd7b5f80edf28c5d2087116482ffc6d19924e90",
+    "api/keyboard.ts": "8ac790b599b89ecda25e432411632968e956f80eca73b6ba172c15ce46c39239",
+    "api/status.ts": "9950d0aa267b83b53eb15a54fc4141695cf7a18966977a14c041426faba5dc5e",
+    "api/commands.ts": "7c051e9b12ca9cd230c31702304fc9b20dd94cee9f0785cc6dfe0492771a0430",
+    "api/outbound.ts": "b08108964c45f9c55810e8964e5f79fd055e4805979a0f2feecf3020615eb13f",
+    "api/voice.ts": "cac65a223fd9785f37f508e5ba868894d69b0b6fda763ab15fa0c541e348070d",
+    "api/inbound.ts": "98fdc74ad00a53f36f991a67fb927108debb7a0b72a910b0ce5660e1f720df33",
+    "api/activity.ts": "79660e98a61644c9c1b73cffa998bee2ed45dd246f1c17fd4f84b689b1bb35a1",
+    "api/updates.ts": "3de5e9cc38353628d10787b3a71f8758bf98a72f8883ea2b7775194f500141cc",
+    "api/sections.ts": "2797d35fa6e780739332752e1298a32a7f038139fd9c7923760faa01eb7ad3d2",
+    "api/delivery.ts": "c66b64f1fa98d03c594f61202afdb064fcb81b9fb6f9984c073bdde067d0dccd"
+  },
+  "host_guards": {
+    "dist/core/session-manager.js": "330d2981053679418571efe6ca3a4b02cf3e5af2e94efd40476d3535f74094ac",
+    "node_modules/@earendil-works/pi-agent-core/dist/agent.js": "d84351e451b9fef40fe2532c446aca90d26a4be9038b2d77d3d45dd6eab21d41",
+    "node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js": "43cc779ddaf90df41768d3d2d0f7d7ba8b8bce7bedc9dc6062ca8b4de84ae880"
+  },
+  "host_files": {
+    "dist/core/agent-session.js": {
+      "before": "91e72d5497f665e731cbd79da6a6e826d8cae7d2ce156a7dee39f8ca205e32c8",
+      "after": "dc34f32f4cc4929223780a810b7835cfac667786d75e4598d849c6558344873f",
+      "edits": [
+        [
+          "    _isAgentRunActive = false;",
+          "    _isAgentRunActive = false;\n    _settlementAborted = false;"
+        ],
+        [
+          "        try {\n            await this._extensionRunner.emit({ type: \"agent_settled\" });\n            this._emit({ type: \"agent_settled\" });",
+          "        const event = { type: \"agent_settled\", aborted: this._settlementAborted };\n        try {\n            await this._extensionRunner.emit(event);\n            this._emit(event);"
+        ],
+        [
+          "    async _runAgentPrompt(messages) {\n        this._isAgentRunActive = true;",
+          "    async _runAgentPrompt(messages) {\n        this._settlementAborted = false;\n        this._isAgentRunActive = true;"
+        ],
+        [
+          "    async abort() {\n        this.abortRetry();",
+          "    async abort() {\n        if (this._isAgentRunActive) this._settlementAborted = true;\n        this.abortRetry();"
+        ],
+        [
+          "    abortRetry() {\n        this._retryAbortController?.abort();",
+          "    abortRetry() {\n        if (this._retryAbortController) this._settlementAborted = true;\n        this._retryAbortController?.abort();"
+        ]
+      ]
+    },
+    "dist/core/agent-session.d.ts": {
+      "before": "c18a61cf0952d19b2d7dfebcfbc0850d5103bcf53e867e466c6d69bcc1b618f6",
+      "after": "6bcb4ea953a55c4d353a218ae18c657ed1c9b0a4e313b49ea2ee5db72b2376c2",
+      "edits": [
+        [
+          "    type: \"agent_settled\";",
+          "    type: \"agent_settled\";\n    /** Local compatibility patch: explicit cancellation in this logical run. */\n    aborted?: boolean;"
+        ]
+      ]
+    },
+    "dist/core/extensions/types.d.ts": {
+      "before": "19fd4e71f4706245192bad73dffb1e7c9d762b12cf099b23b6ec2040a6cd9001",
+      "after": "fa60448ff6259bb94afb6e92e62cb63ca9a1b8bdcc24657f43fed07a4606f2ff",
+      "edits": [
+        [
+          "export interface AgentSettledEvent {\n    type: \"agent_settled\";",
+          "export interface AgentSettledEvent {\n    type: \"agent_settled\";\n    /** Local compatibility patch: includes cancellation during native retry backoff. */\n    aborted?: boolean;"
+        ]
+      ]
+    }
+  }
+}

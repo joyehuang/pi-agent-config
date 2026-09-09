@@ -1,0 +1,140 @@
+--- a/lib/send-queue.ts
++++ b/lib/send-queue.ts
+@@ -20,6 +20,9 @@
+   source?: string;
+   target?: {chatId: number; threadId?: number};
+   replyTo?: number;
++  replyIntent?: string;
++  replyPart?: number;
++  nextReplyPart?: number;
+ }
+ const context = new AsyncLocalStorage<SendContext>();
+ export function withTelegramSendContext<T>(value: SendContext, work: () => T): T {
+@@ -27,7 +30,7 @@
+ }
+ 
+ export interface TelegramSendCorrelation {
+-  requestId?: string; activityId?: string; route?: string; source?: string; placement?: string; replyTo?: number;
++  requestId?: string; activityId?: string; route?: string; source?: string; placement?: string; replyTo?: number; replyIntent?: string; replyPart?: number;
+ }
+ export function parseTelegramSendCorrelation(value: unknown): TelegramSendCorrelation {
+   const out: TelegramSendCorrelation = {};
+@@ -37,10 +40,18 @@
+     if (typeof data[key] === "string" && data[key].length <= 256) out[key] = data[key];
+   }
+   if (typeof data.replyTo === "number" && Number.isSafeInteger(data.replyTo)) out.replyTo = data.replyTo;
++  if (typeof data.replyIntent === "string" && /^[a-f0-9]{64}$/.test(data.replyIntent)) out.replyIntent = data.replyIntent;
++  if (Number.isSafeInteger(data.replyPart) && Number(data.replyPart) >= 0) out.replyPart = Number(data.replyPart);
+   return out;
+ }
+ export function getTelegramSendCorrelation(): TelegramSendCorrelation {
+-  return parseTelegramSendCorrelation(context.getStore());
++  const captured = context.getStore();
++  const correlation = parseTelegramSendCorrelation(captured);
++  if (captured?.replyIntent && correlation.replyPart === undefined) {
++    correlation.replyPart = captured.nextReplyPart ?? 0;
++    captured.nextReplyPart = (captured.nextReplyPart ?? 0) + 1;
++  }
++  return correlation;
+ }
+ 
+ export interface SendScope {
+@@ -149,7 +160,7 @@
+       }
+     } finally { pumping = false; }
+   }
+-  return {
++  const queue: TelegramSendQueue = {
+     getError() {
+       try {
+         const state = stateFor(identity(options.getScope()));
+@@ -255,6 +266,9 @@
+               ledger("unknown");
+               try {
+                 const result = await request();
++                if (durable && captured?.replyIntent && typeof (result as { message_id?: number })?.message_id !== "number") {
++                  throw Object.assign(new Error("Telegram reply receipt is unknown"), { name: "TelegramApiCommitUnknownError" });
++                }
+                 ledger(typeof (result as { message_id?: number })?.message_id === "number" || method.startsWith("edit") ? "success" : "unknown", (result as { message_id?: number })?.message_id);
+                 if (durable) {
+                   try {
+@@ -307,4 +321,59 @@
+       });
+     },
+   };
+-}
++
++  // A physical send reservation lives at the owner transport, including follower
++  // calls. Only assistant-output explicitly supplies this logical reply intent.
++  // Queue finals/quotes, edits, drafts, and media never participate.
++  const replies = new Map<string, Promise<unknown>>();
++  const canonical = (value: unknown): unknown => Array.isArray(value)
++    ? value.map(canonical)
++    : value && typeof value === "object"
++      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)]))
++      : value;
++  return {
++    getError: queue.getError,
++    async run<T>(method: string, body: Record<string, unknown>, send: () => Promise<T>, signal?: AbortSignal): Promise<T> {
++      const captured = context.getStore();
++      if (!journaled.has(method) || captured?.route !== "assistant-output" ||
++          !captured.activityId || !captured.replyIntent) return queue.run(method, body, send, signal);
++      const scope = options.getScope();
++      if (scope.ownerEpoch === undefined || signal?.aborted || !captured.isActive()) {
++        throw new Error("Telegram outbound request cancelled: delivery authority changed");
++      }
++      const part = captured.replyPart ?? captured.nextReplyPart ?? 0;
++      if (captured.replyPart === undefined) captured.nextReplyPart = part + 1;
++      const replyKey = createHash("sha256").update(JSON.stringify([
++        identity(scope), scope.ownerEpoch, options.getTargetIdentity?.(body),
++        captured.activityId, captured.requestId, captured.source, captured.replyIntent,
++        part, method, canonical(body),
++      ])).digest("hex");
++      const existing = replies.get(replyKey);
++      if (existing) {
++        // Return the original result/unknown rejection, never mint another
++        // delivery_id or success row. This is logical reuse, not another send.
++        options.record("outbound", "Logical reply delivery reused", { method, replyKey });
++        return existing as Promise<T>;
++      }
++      // Never evict in-flight/unknown/success evidence and quietly allow a
++      // duplicate. A bounded process-local index fails visibly at capacity.
++      if (replies.size >= 16384) throw new Error("Logical reply index full; delivery review/reload required");
++      let resolve!: (value: T) => void;
++      let reject!: (error: unknown) => void;
++      const reservation = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
++      replies.set(replyKey, reservation);
++      void queue.run(method, body, send, signal).then(result => {
++        if (typeof (result as { message_id?: number })?.message_id !== "number") {
++          reject(Object.assign(new Error("Telegram reply receipt is unknown"), { name: "TelegramApiCommitUnknownError" }));
++        } else resolve(result);
++      }, error => {
++        const response = error as { status?: number; name?: string };
++        // Only a definitive API rejection permits a new physical attempt.
++        // Unknown ACK (including bus loss) retains the rejecting reservation.
++        if (response.name !== "TelegramApiCommitUnknownError" && response.status && response.status >= 400 && response.status < 500) replies.delete(replyKey);
++        reject(error);
++      });
++      return reservation;
++    },
++  };
++}
+--- a/lib/bindings.ts
++++ b/lib/bindings.ts
+@@ -4,6 +4,7 @@
+  * Owns pi-facing tool, command, and lifecycle hook registration for the entrypoint
+  */
+ 
++import { createHash } from "node:crypto";
+ import * as Activity from "./activity.ts";
+ import type { TelegramActivityVerbosityRuntime } from "./activity-verbosity.ts";
+ import * as CommandTemplates from "./command-templates.ts";
+@@ -109,7 +110,7 @@
+     async send(event, authority, isAuthorityActive) {
+       await deps.waitForActivityIdle?.();
+       if (!isAuthorityActive()) return;
+-      await withTelegramSendContext({ priority: "background", isActive: isAuthorityActive, activityId: event.activityId, requestId: event.activityId, route: "assistant-output", source: event.source, placement: event.placement, target: authority.target },
++      await withTelegramSendContext({ priority: "background", isActive: isAuthorityActive, activityId: event.activityId, requestId: event.activityId, route: "assistant-output", source: event.source, placement: event.placement, replyIntent: createHash("sha256").update(event.text).digest("hex"), target: authority.target },
+         () => sendOutput(event, authority, isAuthorityActive));
+     },
+     recordFailure(event, error) {

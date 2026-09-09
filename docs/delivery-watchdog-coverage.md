@@ -42,3 +42,7 @@
 - R4 实际 QQ stdout 调用者：fixed / covered offline / production pending。QQ handoff 严格接受 queued DIGITS-DIGITS.json，新增 durable legacy_receipt 映射恢复该契约；显式结构化/--json 调用维持新协议 JSON。直接可执行、python、python -u、TEXT/SOURCE、多行文本、NOTIFY_PROFILE 和非零配置失败均覆盖。测试不运行外部业务脚本，不产生真实发送。
 - 调用者核对：covered read-only。检查 ~/bin、~/dev（排除依赖/构建）、在线 extensions、LaunchAgents、相关 skill 指令，并补充 HOME 代码文件搜索；没有发现其他直接 spool writer。私有 caller-inventory.json 仅存路径/调用位置/契约分类。residual：未遍历原始会话、历史 artifact、依赖/缓存或不可读 Trash；动态拼接/未落盘命令不可能用静态搜索穷尽。部分现有调用者忽略失败或独立设置更短 timeout，其可靠性不等于本轮 CLI 兼容，不能宣称全部迁移完成。
 - 原 sender/bridge patch 未修改，原 19 项和所有新增回归一起运行；仍验证补丁前自主→用户双发送、修后一次、跨线程、bus ACK unknown 等原边界。部署必须接受返工后的新 commit，不接受旧 commit 代替。生产 before hash 再次核验，运行时重启/上线仍由主 agent 负责。
+
+## 后续重复 completion 修复
+
+原先“empty guard 保留”的覆盖结论不涵盖 native retry 与 synthetic follow-up 重叠。后续离线重现已证明：空 error 的 agent_end 提前排入自动 follow-up，native retry 成功后仍消费它，导致同活动再次回复。新独立补丁改为 settlement 后基于当前分支判断，并在 owner sender 保留同 intent 的 in-flight/success/unknown 状态；详见 [重复回复修复](duplicate-reply-fix.md)。生产激活仍由主 maintainer 独立完成。

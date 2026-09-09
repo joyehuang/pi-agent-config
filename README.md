@@ -46,3 +46,7 @@ Telegram delivery / task-watchdog 修复见 [交接说明](docs/delivery-watchdo
 
 - 改动后立即 `git add -A && git commit && git push`
 - 真实密钥只存 `~/.config/`（0600），不写入本仓库
+
+## 重复 completion 修复（独立补丁）
+
+当前安装基线上的空回复恢复与同活动投递去重见 [实现、离线验证与安全激活](docs/duplicate-reply-fix.md)。运行 `python3 scripts/verify_duplicate_reply_fix.py --evidence /absolute/task/artifacts/verification` 和默认只读的 `python3 scripts/apply_duplicate_reply_fix.py`。此补丁包含 Pi core settlement 的取消标记，必须成套安装并由主 maintainer 在当前响应结束后监督主 wrapper child 重启；不能只复制 guard 或仅 `/reload`。旧 delivery/watchdog 补丁与历史基线保持不变。
