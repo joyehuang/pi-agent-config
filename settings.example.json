@@ -17,11 +17,10 @@
   ],
   "enabledModels": [
     "openai-codex/gpt-5.6-sol",
-    "openai-codex/gpt-5.6-luna",
     "deepseek/deepseek-v4-flash",
     "cmd-code/cc/deepseek-v4-flash",
     "openrouter/z-ai/glm-5.3-flash",
     "cmd-code/z-ai/glm-5.3-flash",
-    "cmd-code/Qwen/Qwen3.8-Flash"
+    "openai-codex-agent/gpt-6-astra"
   ]
 }
