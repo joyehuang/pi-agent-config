@@ -21,6 +21,7 @@
     "cmd-code/cc/deepseek-v4-flash",
     "openrouter/z-ai/glm-5.3-flash",
     "cmd-code/z-ai/glm-5.3-flash",
-    "openai-codex-agent/gpt-6-astra"
+    "openai-codex-agent/gpt-6-astra",
+    "openrouter/anthropic/claude-opus-5.5"
   ]
 }
