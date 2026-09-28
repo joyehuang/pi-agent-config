@@ -39,6 +39,32 @@ export default function (pi) {
         },
       },
       {
+        // OpenRouter catalog verified 2026-09-29; standard route, $2/$10 per M, cache read 0.2 / write 2.5.
+        id: "anthropic/claude-sonnet-5.5",
+        name: "Claude Sonnet 5.5 (OpenRouter)",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 1000000,
+        maxTokens: 128000,
+        cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+          max: "max",
+        },
+        compat: {
+          thinkingFormat: "openrouter",
+          supportsReasoningEffort: true,
+          supportsDeveloperRole: false,
+          maxTokensField: "max_tokens",
+          cacheControlFormat: "anthropic",
+        },
+      },
+      {
         id: "z-ai/glm-5.3-flash",
         name: "GLM 5.3 Flash",
         reasoning: true,
