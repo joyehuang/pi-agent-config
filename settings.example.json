@@ -1,9 +1,9 @@
 {
   "lastChangelogVersion": "0.84.1",
   "theme": "dark",
-  "defaultProvider": "cmd-code",
-  "defaultModel": "Qwen/Qwen3.8-Flash",
-  "defaultThinkingLevel": "medium",
+  "defaultProvider": "anthropic-direct",
+  "defaultModel": "claude-sonnet-5-5",
+  "defaultThinkingLevel": "high",
   "packages": [
     "npm:pi-feishu-agent",
     "npm:@llblab/pi-telegram",
@@ -22,6 +22,7 @@
     "openrouter/z-ai/glm-5.3-flash",
     "cmd-code/z-ai/glm-5.3-flash",
     "openai-codex-agent/gpt-6-astra",
-    "openrouter/anthropic/claude-opus-5.5"
+    "openrouter/anthropic/claude-opus-5.5",
+    "anthropic-direct/claude-sonnet-5-5"
   ]
 }
